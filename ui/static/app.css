@@ -763,6 +763,12 @@ code {
 .task-form > summary:hover {
   color: var(--text);
 }
+/* The registration receipt, parked on the summary because that is the part of the
+   <details> that survives collapsing. Declared after :hover so pointing at it does not
+   grey out the confirmation. */
+.task-form > summary.summary--ok {
+  color: var(--ok);
+}
 .task-form form {
   margin-top: 10px;
   display: flex;
@@ -1461,4 +1467,29 @@ a.pill:hover {
   .corpus {
     flex-wrap: wrap;
   }
+}
+
+/* The widen offer — "nothing in the last 30 minutes answers this; search back?"
+   Styled as a question the user answers, not as a status line: the choice behind it is
+   whether to spend tens of seconds of the single VLM slot re-watching footage. */
+.widen {
+  margin-top: 8px;
+  padding: 9px 10px;
+  border: 1px dashed color-mix(in srgb, var(--info) 45%, var(--line));
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--info) 7%, transparent);
+}
+.widen-text {
+  margin: 0 0 8px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.widen-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.btn--small {
+  font-size: 11.5px;
+  padding: 4px 9px;
 }

@@ -99,10 +99,15 @@ class Escalation:
     t_start: datetime | None = None
     t_end: datetime | None = None
     timeout_seconds: float = 0.0
+    #: The turn WOULD have escalated, but the recent window is the thing that came up
+    #: short, so the wider search is being offered instead. `escalated` is False and no
+    #: job exists — the record still says the gate fired, which is what the badge reads.
+    deferred: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "escalated": self.escalated,
+            "deferred": self.deferred,
             "triggers": list(self.triggers),
             "gate": self.gate.to_dict(),
             "tool_requested": self.tool_requested,
@@ -124,6 +129,11 @@ class AskResult:
     dedupe_of: str | None = None
     tool_calls: list[ToolInvocation] = field(default_factory=list)
     retrieval: dict[str, Any] = field(default_factory=dict)
+    #: Set when the recent window could not answer and the user is being OFFERED a wider
+    #: search rather than given one. No job is queued while this is pending: the deep
+    #: path costs tens of seconds of the single VLM slot, and spending that on a guess
+    #: about what the user meant is how "I don't know" becomes a 90 s wait.
+    widen_offer: dict[str, Any] | None = None
 
     def to_payload(self) -> dict[str, Any]:
         """``POST /api/ask``'s body: ``ChatTurn.to_dict()`` plus the optional extras.
@@ -140,6 +150,7 @@ class AskResult:
         payload["retrieval"] = dict(self.retrieval)
         payload["tool_calls"] = [call.to_dict() for call in self.tool_calls]
         payload["cited"] = [hit.to_dict() for hit in self.hits]
+        payload["widen_offer"] = dict(self.widen_offer) if self.widen_offer else None
         return payload
 
 
@@ -167,6 +178,7 @@ class AskAgent:
         turn_id: str | None = None,
         t_from: datetime | None = None,
         t_to: datetime | None = None,
+        widen: bool = False,
     ) -> AskResult:
         """Answer a question provisionally. **Never blocks on deep analysis.**
 
@@ -179,8 +191,17 @@ class AskAgent:
             raise ValueError("question is empty")
         turn_id = turn_id or f"turn-{uuid.uuid4().hex[:8]}"
 
-        with timed("agent.ask", turn_id=turn_id, question=question) as span:
-            hits = self._tools.search_index(question, t_from, t_to)
+        # The surface is asked about NOW, so an ask covers the recent window unless the
+        # caller gave an explicit range or has already agreed to look further back.
+        explicit_range = t_from is not None or t_to is not None
+        lookback = (
+            self._s.search_extended_lookback_seconds
+            if widen
+            else self._s.search_lookback_seconds
+        )
+
+        with timed("agent.ask", turn_id=turn_id, question=question, widened=widen) as span:
+            hits = self._tools.search_index(question, t_from, t_to, lookback_seconds=lookback)
             context = self._tools.as_context(hits)
 
             gate = self._gate(question, context)
@@ -207,6 +228,25 @@ class AskAgent:
                 why=_why(gate, deep_call),
                 timeout_seconds=self._s.deep_timeout_seconds,
             )
+
+            # Offer the wider search instead of taking it. Only when the recent window
+            # is what failed: an explicit range is the caller's decision, and a question
+            # already widened has nowhere further to go — that one escalates for real.
+            widen_offer: dict[str, Any] | None = None
+            if (
+                escalation.escalated
+                and self._s.confirm_before_widening
+                and not widen
+                and not explicit_range
+            ):
+                widen_offer = {
+                    "reason": escalation.why,
+                    "searched_seconds": int(self._s.search_lookback_seconds),
+                    "offer_seconds": int(self._s.search_extended_lookback_seconds),
+                    "question": question,
+                }
+                escalation.escalated = False
+                escalation.deferred = True
 
             job: DeepJob | None = None
             dedupe_of: str | None = None
@@ -266,6 +306,7 @@ class AskAgent:
             dedupe_of=dedupe_of,
             tool_calls=invocations,
             retrieval=self._retrieval_meta(hits),
+            widen_offer=widen_offer,
         )
 
     # -- the two model calls ---------------------------------------------------------

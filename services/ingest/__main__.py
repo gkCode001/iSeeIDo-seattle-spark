@@ -121,7 +121,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         with IngestPipeline(settings, sink=sink) as pipeline:
             if args.follow:
-                stats = pipeline.follow()
+                stats = pipeline.follow(t_from)
             else:
                 stats = pipeline.run(t_from, t_to, limit=args.limit)
     finally:

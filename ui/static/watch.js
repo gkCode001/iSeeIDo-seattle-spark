@@ -29,6 +29,8 @@ SPARK.watch = (function () {
     els.list = root.querySelector("[data-watch-list]");
     els.form = root.querySelector("[data-watch-form]");
     els.formMsg = root.querySelector("[data-watch-formmsg]");
+    els.details = root.querySelector("details.task-form");
+    els.summary = els.details ? els.details.querySelector("summary") : null;
     els.endpoint = root.querySelector("[data-watch-endpoint]");
     els.stamp = root.querySelector("[data-watch-stamp]");
 
@@ -40,13 +42,18 @@ SPARK.watch = (function () {
     // open form is taller than the pane, so its foot is clipped and the heading is easy
     // to lose. Reset on close so a half-typed task does not reappear later looking real.
     var cancel = root.querySelector("[data-watch-cancel]");
-    var details = root.querySelector("details.task-form");
-    if (cancel && details) {
+    if (cancel && els.details) {
       cancel.addEventListener("click", function () {
-        details.open = false;
-        els.form.reset();
-        prefillForm();
-        formMessage("", "");
+        closeForm();
+      });
+    }
+
+    // Reopening is the one unambiguous "I am done reading that" signal, so it is what
+    // clears the last registration's receipt — no timer, nothing that expires while the
+    // user is still looking at it.
+    if (els.details) {
+      els.details.addEventListener("toggle", function () {
+        if (els.details.open) resetSummary();
       });
     }
 
@@ -344,11 +351,33 @@ SPARK.watch = (function () {
     f.elements.active.value = "00:00-24:00";
   }
 
+  /* task_id is the cooldown and dedupe key (SPEC §6.4), so it has to be a stable slug —
+   * but that is our constraint, not something a person typing "Loading dock blocked"
+   * should be made to satisfy by hand. Normalise instead of rejecting, and write the
+   * result back into the field before submitting: the key is what the Timeline and the
+   * action log will show forever, so the user must see the one they are actually getting.
+   * Never transform it silently. */
+  function slugify(raw) {
+    return String(raw)
+      .normalize("NFKD")
+      .replace(/[\u0300-\u036f]/g, "") // strip accents rather than eat the letter
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 49)
+      .replace(/-+$/, ""); // the slice may have landed mid-separator
+  }
+
   function onRegister(ev) {
     ev.preventDefault();
     var f = els.form;
+
+    var typedId = f.elements.task_id.value.trim();
+    var slugId = slugify(typedId);
+    f.elements.task_id.value = slugId;
+
     var payload = {
-      task_id: f.elements.task_id.value.trim(),
+      task_id: slugId,
       describe: f.elements.describe.value.trim(),
       window: parseInt(f.elements.window.value, 10),
       action: f.elements.action.value,
@@ -364,13 +393,16 @@ SPARK.watch = (function () {
     SPARK.data
       .registerTask(payload)
       .then(function (task) {
-        formMessage(
-          "registered " + task.task_id + " → " + task.action +
-            (SPARK.data.isMock() ? " (mock: held in this page only)" : ""),
-          "ok"
-        );
-        f.reset();
-        prefillForm();
+        var receipt =
+          "✓ registered " + task.task_id + " → " + task.action +
+          (task.task_id !== typedId ? " (slugified from “" + typedId + "”)" : "") +
+          (SPARK.data.isMock() ? " (mock: held in this page only)" : "");
+        // The form is done; the new card in the list is the real confirmation. Collapse
+        // it so the pane goes back to the funnel — but the receipt names the slug we
+        // chose, so it moves to the <summary>, which is what stays on screen when the
+        // <details> closes. Leaving it in the closed body would hide the rename.
+        closeForm();
+        summaryMessage(receipt);
         return refresh();
       })
       .catch(function (err) {
@@ -379,8 +411,9 @@ SPARK.watch = (function () {
   }
 
   function validate(p) {
-    if (!/^[a-z0-9][a-z0-9-]{1,48}$/.test(p.task_id))
-      return "task_id must be a lowercase slug — it is the cooldown and dedupe key";
+    // Anything typeable slugifies; only "nothing usable was typed" can reach this.
+    if (!/^[a-z0-9][a-z0-9-]{0,48}$/.test(p.task_id))
+      return "task_id needs at least one letter or digit — it is the cooldown and dedupe key";
     if (p.describe.length < 8) return "describe needs real words; it is embedded once and matched forever";
     if (!(p.window > 0)) return "window must be a positive number of seconds";
     if (!(p.cooldown > 0))
@@ -388,6 +421,29 @@ SPARK.watch = (function () {
     if (!/^([01]\d|2[0-4]):[0-5]\d-([01]\d|2[0-4]):[0-5]\d$/.test(p.active))
       return "active must look like 18:00-06:00 (local wall clock, may wrap midnight)";
     return null;
+  }
+
+  var SUMMARY_IDLE = "+ define a standing task";
+
+  /** Collapse and empty the form, so a half-typed task never reappears looking real. */
+  function closeForm() {
+    if (els.details) els.details.open = false;
+    els.form.reset();
+    prefillForm();
+    formMessage("", "");
+  }
+
+  function summaryMessage(text) {
+    if (!els.summary) return;
+    els.summary.textContent = text;
+    els.summary.classList.add("summary--ok");
+  }
+
+  function resetSummary() {
+    if (!els.summary) return;
+    els.summary.textContent = SUMMARY_IDLE;
+    els.summary.classList.remove("summary--ok");
+    formMessage("", "");
   }
 
   function formMessage(text, kind) {

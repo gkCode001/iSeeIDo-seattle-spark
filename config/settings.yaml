@@ -300,7 +300,18 @@ agent:
   temperature: 0.0
   ui_dir: ui
   search:
-    default_lookback_seconds: 86400
+    # The ask surface is asked about NOW. Answering from the whole day lets a caption
+    # from hours ago outrank the last few minutes on a lexical tie, and the answer looks
+    # confidently wrong rather than absent — the user asks "what is happening" and gets
+    # this morning.
+    default_lookback_seconds: 1800        # 30 minutes
+    # Used only after the user says yes to looking further back. Widening is offered,
+    # never assumed: re-watching an hour of footage is the expensive path (SPEC §5), and
+    # a system that silently reaches for it turns "I don't know" into a 90 s wait.
+    extended_lookback_seconds: 86400      # 24 hours
+    # Ask before widening. Set false to go straight to the old behaviour — search the
+    # extended window and escalate without a prompt.
+    confirm_before_widening: true
   chunks:
     lookback_seconds: 3600
     max: 500

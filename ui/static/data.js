@@ -396,11 +396,11 @@ SPARK.data = (function () {
     return prefix + "-" + String(Date.now()).slice(-6) + "-" + _seq;
   }
 
-  function ask(question, h) {
-    return isMock() ? askMock(question, h) : askLive(question, h);
+  function ask(question, h, opts) {
+    return isMock() ? askMock(question, h) : askLive(question, h, opts);
   }
 
-  function askLive(question, h) {
+  function askLive(question, h, opts) {
     var turn = {
       turn_id: newId("turn"),
       ts: nowIso(),
@@ -412,11 +412,23 @@ SPARK.data = (function () {
       latency_s: null,
     };
     h.onSubmitted(turn);
-    return postJSON(ENDPOINTS.ask, { question: question })
+    // `widen` is the user answering the previous turn's offer — "nothing in the last
+    // 30 minutes covers that; look further back?". Only a click sets it.
+    var body = { question: question };
+    if (opts && opts.widen) body.widen = true;
+    return postJSON(ENDPOINTS.ask, body)
       .then(function (resp) {
         // The server owns turn_id; adopt it so WebSocket refinements address the
         // right card. Everything else is ChatTurn.to_dict().
-        h.onProvisional(resp, { dedupe_of: resp.dedupe_of || null, job: resp.job || null }, turn.turn_id);
+        h.onProvisional(
+          resp,
+          {
+            dedupe_of: resp.dedupe_of || null,
+            job: resp.job || null,
+            widen_offer: resp.widen_offer || null,
+          },
+          turn.turn_id
+        );
         return resp;
       })
       .catch(function (err) {

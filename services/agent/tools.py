@@ -207,6 +207,8 @@ class Toolbox:
         query: str,
         t_from: datetime | None = None,
         t_to: datetime | None = None,
+        *,
+        lookback_seconds: float | None = None,
     ) -> list[SearchHit]:
         """SPEC §3.4 retrieval: embed → ANN k=20 → rerank → top 5, ranges attached.
 
@@ -216,8 +218,13 @@ class Toolbox:
         today.
         """
         if t_from is None and t_to is None:
+            window = (
+                lookback_seconds
+                if lookback_seconds is not None
+                else self._s.search_lookback_seconds
+            )
             t_to = utcnow()
-            t_from = t_to - timedelta(seconds=self._s.search_lookback_seconds)
+            t_from = t_to - timedelta(seconds=window)
         with timed("agent.search", query=query) as span:
             hits = self._index.search(query, t_from, t_to)
             span.fields["hits"] = len(hits)

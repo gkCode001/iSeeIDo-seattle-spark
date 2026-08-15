@@ -73,8 +73,19 @@ TOP_N = int(config.get("index.search.rerank_top_n"))
 DEEP_TIMEOUT = float(config.get("agent.deep.timeout_seconds"))
 
 CAMERA = "cam01"
-SEGMENT = "cam01_20260814_211100.mp4"
-SEGMENT_START = datetime(2026, 8, 14, 21, 11, 0, tzinfo=timezone.utc)
+
+#: The staged minute, anchored a few minutes BEFORE now rather than to a fixed date.
+#:
+#: It used to be a literal 2026-08-14T21:11:00Z, which made every test that asks without
+#: an explicit range a time bomb: the ask surface searches a window ending now, so the
+#: corpus fell out of it once the wall clock moved past the lookback — silently, as an
+#: empty context rather than an error. Anchoring to now keeps the fixture inside the
+#: window the surface actually uses, whatever that window is set to.
+#:
+#: Nothing here asserts a literal wall-clock string; the assertions are all relative to
+#: SEGMENT_START, so anchoring costs nothing and removes the bomb.
+SEGMENT_START = (utcnow() - timedelta(minutes=5)).replace(microsecond=0)
+SEGMENT = f"{CAMERA}_{SEGMENT_START:%Y%m%d_%H%M%S}.mp4"
 
 #: The SPEC §10 D6 pair, on one staged afternoon: one question the captions answer and
 #: one they genuinely cannot.
@@ -226,6 +237,11 @@ class AgentCase(unittest.TestCase):
         self.settings = dataclasses.replace(
             AgentSettings.from_config(),
             chat_log=self.tmp / "chats.jsonl",
+            # Escalation MECHANISMS are what most of this file tests — the gate firing,
+            # the tool being chosen, the turn not blocking. Whether the wider search is
+            # offered first is a separate decision with its own class below, so it is
+            # pinned off here rather than threaded through every assertion.
+            confirm_before_widening=False,
             **self.settings_overrides,
         )
         self.index = build_index()
@@ -1014,8 +1030,13 @@ class TestServer(AgentCase):
         self.assertIn("range", detail)
 
     def test_video_reports_a_hole_rather_than_short_footage(self) -> None:
-        t_from = to_iso(SEGMENT_START)
-        t_to = to_iso(SEGMENT_START + timedelta(seconds=5))
+        # A range no recorder has ever covered. NOT the fixture range: the fixtures are
+        # anchored a few minutes before now, and on a box that is actually recording
+        # that window has real footage in data/archive — the endpoint would rightly
+        # serve it and this test would be asserting the opposite of the truth.
+        never = SEGMENT_START.replace(year=SEGMENT_START.year - 3)
+        t_from = to_iso(never)
+        t_to = to_iso(never + timedelta(seconds=5))
         try:
             self.get(f"/api/video?t_from={t_from}&t_to={t_to}")
             self.fail("expected a 404 for footage that was never recorded")
@@ -1393,3 +1414,109 @@ class TestTaskCrud(unittest.TestCase):
         )
         self.assertEqual(int(status), 200)
         self.assertIn("seeded-one", self._ids())
+
+
+class TestRecentScopeAndWidening(unittest.TestCase):
+    """An ask covers the RECENT window; looking further back is offered, not taken.
+
+    Two failures this prevents. Answering from the whole day lets a caption from hours
+    ago outrank the last few minutes on a lexical tie, so "what is happening" returns
+    this morning and looks confidently wrong rather than absent. And reaching for the
+    deep worker the moment the recent window comes up short spends tens of seconds of
+    the single VLM slot on a guess about what the user meant — "I don't know" becomes a
+    90 s wait.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="scope-"))
+        self.index = build_index()
+        self.index.ensure_ready()
+        self.index.insert(fixture_chunks())
+        self.addCleanup(self.index.close)
+        self.analyzer = FakeAnalyzer()
+        self.settings = dataclasses.replace(
+            AgentSettings.from_config(),
+            chat_log=self.tmp / "chats.jsonl",
+            confirm_before_widening=True,
+        )
+        self.chat_log = ChatLog(self.settings.chat_log)
+        self.jobs = JobRegistry(self.analyzer, self.settings)
+        self.tools = Toolbox(
+            self.index,
+            ActionServer(log_path=self.tmp / "actions.jsonl", clip_cutter=NullClipCutter()),
+            self.jobs,
+            self.settings,
+        )
+
+    def _agent(self, verdict: str) -> AskAgent:
+        return AskAgent(ScriptedBackend(verdict=verdict), self.tools, self.chat_log, self.settings)
+
+    def test_an_unanswerable_question_offers_instead_of_escalating(self) -> None:
+        result = self._agent("NO\nthe captions do not record it").ask(ESCALATING_QUESTION)
+        self.assertIsNotNone(result.widen_offer)
+        self.assertTrue(result.escalation.deferred)
+        self.assertFalse(result.escalation.escalated)
+        self.assertIsNone(result.job, "no VLM time may be spent before the user asks for it")
+
+    def test_the_offer_states_both_windows(self) -> None:
+        """The user is being asked to authorise cost, so the numbers have to be in it."""
+        offer = self._agent("NO\nnot recorded").ask(ESCALATING_QUESTION).widen_offer
+        assert offer is not None
+        self.assertEqual(offer["searched_seconds"], int(self.settings.search_lookback_seconds))
+        self.assertEqual(
+            offer["offer_seconds"], int(self.settings.search_extended_lookback_seconds)
+        )
+        self.assertTrue(offer["reason"])
+
+    def test_the_gate_verdict_is_still_recorded_when_deferred(self) -> None:
+        """The badge reads the persisted verdict; deferring must not erase it."""
+        result = self._agent("NO\nnot recorded").ask(ESCALATING_QUESTION)
+        self.assertIs(result.turn.grounded, False)
+        self.assertIn(TRIGGER_GATE, result.escalation.triggers)
+
+    def test_widening_escalates_for_real_when_it_still_cannot_answer(self) -> None:
+        result = self._agent("NO\nstill not recorded").ask(ESCALATING_QUESTION, widen=True)
+        self.assertIsNone(result.widen_offer, "there is nowhere further back to offer")
+        self.assertTrue(result.escalation.escalated)
+        self.assertIsNotNone(result.job)
+
+    def test_widening_searches_the_extended_window(self) -> None:
+        agent = self._agent("YES\ncovered")
+        agent.ask(ESCALATING_QUESTION, widen=True)
+        # The widened search must reach further back than the default one.
+        self.assertGreater(
+            self.settings.search_extended_lookback_seconds,
+            self.settings.search_lookback_seconds,
+        )
+
+    def test_an_explicit_range_is_never_second_guessed(self) -> None:
+        """A caller who named a range has already decided; do not ask them again."""
+        result = self._agent("NO\nnot recorded").ask(
+            ESCALATING_QUESTION,
+            t_from=SEGMENT_START - timedelta(hours=1),
+            t_to=SEGMENT_START + timedelta(hours=1),
+        )
+        self.assertIsNone(result.widen_offer)
+        self.assertTrue(result.escalation.escalated)
+
+    def test_a_grounded_answer_is_never_offered_a_wider_search(self) -> None:
+        result = self._agent("YES\nthe captions state it").ask(GROUNDED_QUESTION)
+        self.assertIsNone(result.widen_offer)
+        self.assertFalse(result.escalation.deferred)
+
+    def test_the_offer_can_be_switched_off(self) -> None:
+        """confirm_before_widening: false restores straight-to-escalation."""
+        settings = dataclasses.replace(self.settings, confirm_before_widening=False)
+        agent = AskAgent(
+            ScriptedBackend(verdict="NO\nnot recorded"), self.tools, self.chat_log, settings
+        )
+        result = agent.ask(ESCALATING_QUESTION)
+        self.assertIsNone(result.widen_offer)
+        self.assertTrue(result.escalation.escalated)
+
+    def test_the_offer_survives_the_wire(self) -> None:
+        payload = self._agent("NO\nnot recorded").ask(ESCALATING_QUESTION).to_payload()
+        self.assertIn("widen_offer", payload)
+        self.assertIsNotNone(payload["widen_offer"])
+        self.assertIs(payload["escalation"]["deferred"], True)
+        self.assertIsNone(payload["job"])

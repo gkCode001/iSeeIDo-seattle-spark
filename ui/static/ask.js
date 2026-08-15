@@ -125,7 +125,7 @@ SPARK.ask = (function () {
   // -----------------------------------------------------------------------------------
   // Submit
   // -----------------------------------------------------------------------------------
-  function submit(question) {
+  function submit(question, opts) {
     SPARK.data.ask(question, {
       onSubmitted: function (turn) {
         renderTurn(turn);
@@ -151,7 +151,7 @@ SPARK.ask = (function () {
         err.textContent = "✗ " + message;
         node.appendChild(err);
       },
-    });
+    }, opts);
   }
 
   /** The server owns turn_id in live mode; re-key the card we already drew. */
@@ -240,7 +240,9 @@ SPARK.ask = (function () {
     // Freeze it. appendRefinement() re-checks this exact string afterwards.
     card.dataset.frozenAnswer = turn.provisional_answer;
 
-    card.appendChild(groundBadge(turn.grounded));
+    var offer = meta.widen_offer || null;
+    card.appendChild(groundBadge(turn.grounded, !!offer));
+    if (offer) card.appendChild(widenOffer(offer, turn));
 
     var job = meta.job || null;
     if (meta.dedupe_of) {
@@ -256,11 +258,17 @@ SPARK.ask = (function () {
 
   /** THE most important pixel in the build (SPEC §11.2). §4.2's gate returns a literal
    *  yes/no; this prints it. */
-  function groundBadge(grounded) {
+  function groundBadge(grounded, deferred) {
     var b = div("ground");
     if (grounded === true) {
       b.className += " ground--indexed";
       b.textContent = "✓ ANSWERED FROM INDEX";
+    } else if (grounded === false && deferred) {
+      // The gate fired, but nothing was queued: the recent window is what came up
+      // short, so the wider search is being OFFERED. Saying "escalated" here would be
+      // a lie about work that is not running.
+      b.className += " ground--escalated";
+      b.textContent = "⚠ NOT ANSWERABLE FROM THE LAST 30 MIN";
     } else if (grounded === false) {
       b.className += " ground--escalated";
       b.textContent = "⚠ NOT ANSWERABLE FROM INDEX → escalated";
@@ -269,6 +277,52 @@ SPARK.ask = (function () {
       b.textContent = "· groundedness gate did not report";
     }
     return b;
+  }
+
+  /** "Nothing in the last 30 minutes covers that — look further back?"
+   *
+   *  Deliberately a QUESTION, not a spinner. Widening re-searches a day of captions and,
+   *  if that still cannot answer, spends tens of seconds of the single VLM slot
+   *  re-watching footage (SPEC §5). Doing that on a guess turns "I don't know" into a
+   *  90 s wait; asking costs one click and tells the user what it is about to cost. */
+  function widenOffer(offer, turn) {
+    var wrap = div("widen");
+    var mins = Math.round((offer.searched_seconds || 1800) / 60);
+    var hours = Math.round((offer.offer_seconds || 86400) / 3600);
+
+    var text = document.createElement("p");
+    text.className = "widen-text";
+    text.textContent =
+      "Nothing in the last " + mins + " minutes answers this. Search back " + hours +
+      " hours? If the older captions cannot answer either, the worker will re-watch the footage.";
+    wrap.appendChild(text);
+
+    var row = div("widen-actions");
+    var yes = document.createElement("button");
+    yes.type = "button";
+    yes.className = "btn btn--primary btn--small";
+    yes.textContent = "Search back " + hours + " h";
+    yes.addEventListener("click", function () {
+      yes.disabled = true;
+      no.disabled = true;
+      yes.textContent = "searching…";
+      submit(turn.question, { widen: true });
+    });
+    var no = document.createElement("button");
+    no.type = "button";
+    no.className = "btn btn--quiet btn--small";
+    no.textContent = "No, keep it recent";
+    no.addEventListener("click", function () {
+      wrap.innerHTML = "";
+      var done = document.createElement("p");
+      done.className = "widen-text muted";
+      done.textContent = "Kept to the last " + mins + " minutes.";
+      wrap.appendChild(done);
+    });
+    row.appendChild(yes);
+    row.appendChild(no);
+    wrap.appendChild(row);
+    return wrap;
   }
 
   function jobLine(job) {

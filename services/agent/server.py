@@ -296,13 +296,22 @@ class AgentApp:
     # -- routes: writes ----------------------------------------------------------------
 
     def post_ask(self, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
-        """SPEC §4. Returns the provisional turn; never awaits the deep job."""
+        """SPEC §4. Returns the provisional turn; never awaits the deep job.
+
+        ``widen: true`` is the user answering the offer this endpoint made on the
+        previous turn — "nothing in the last 30 minutes covers that; look further back?".
+        It searches the extended window and, if that still cannot answer, escalates for
+        real. Only the user can set it: reaching for the deep path unasked is how "I
+        don't know" turns into a 90 s wait on the single VLM slot.
+        """
         question = str(body.get("question") or "").strip()
         if not question:
             return HTTPStatus.BAD_REQUEST, {"detail": "question is required"}
         t_from = _parse_iso(body.get("t_from"))
         t_to = _parse_iso(body.get("t_to"))
-        result = self.agent.ask(question, t_from=t_from, t_to=t_to)
+        result = self.agent.ask(
+            question, t_from=t_from, t_to=t_to, widen=bool(body.get("widen"))
+        )
         return HTTPStatus.OK, result.to_payload()
 
     def post_register_task(self, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:

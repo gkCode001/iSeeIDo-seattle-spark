@@ -72,7 +72,13 @@ class AgentSettings:
     deep_poll_interval_seconds: float
 
     # --- retrieval ----------------------------------------------------------------
+    #: The window an ask covers by default. The surface is asked about NOW.
     search_lookback_seconds: float
+    #: Used only once the user has agreed to look further back.
+    search_extended_lookback_seconds: float
+    #: Offer the wider search rather than taking it. Re-watching an hour of footage is
+    #: the expensive path; reaching for it unasked turns "I don't know" into a 90 s wait.
+    confirm_before_widening: bool
 
     # --- server -------------------------------------------------------------------
     host: str
@@ -128,6 +134,10 @@ class AgentSettings:
             search_lookback_seconds=float(
                 _pending("agent.search.default_lookback_seconds")  # type: ignore[arg-type]
             ),
+            search_extended_lookback_seconds=float(
+                _pending("agent.search.extended_lookback_seconds")  # type: ignore[arg-type]
+            ),
+            confirm_before_widening=bool(_pending("agent.search.confirm_before_widening")),
             host=str(config.get("agent.host")),
             port=int(config.get("agent.port")),
             ui_dir=(config.REPO_ROOT / str(_pending("agent.ui_dir"))).resolve(),

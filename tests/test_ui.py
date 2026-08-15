@@ -373,9 +373,17 @@ class TestStandingTaskForm(unittest.TestCase):
         self.assertIn("details.open = false", self.js)
 
     def test_cancelling_clears_the_half_typed_task(self) -> None:
-        """A partly-filled task left behind would reappear later looking real."""
-        handler = self.js[self.js.index("data-watch-cancel") :][:700]
-        self.assertIn("reset()", handler)
+        """A partly-filled task left behind would reappear later looking real.
+
+        Asserts the BEHAVIOUR through whatever helper cancel delegates to, rather than
+        scanning a fixed slice after the listener — that slice stopped seeing the reset
+        the moment the handler was extracted into closeForm().
+        """
+        self.assertIn("closeForm()", self.js[self.js.index("data-watch-cancel") :][:400])
+        close = self.js[self.js.index("function closeForm()") :]
+        close = close[: close.index("\n  }") + 4]
+        self.assertIn("open = false", close)
+        self.assertIn("reset()", close)
 
 
 class TestIndexNavLink(unittest.TestCase):

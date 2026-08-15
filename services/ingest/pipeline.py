@@ -262,8 +262,31 @@ class IngestPipeline:
         self.log_summary()
         return self.stats
 
+    def _resume_point(self) -> datetime | None:
+        """The end of the newest chunk already indexed, or None when nothing is.
+
+        Best-effort: a sink that cannot answer (a plain list in a test, a backend that
+        has no browse) simply means "start from the archive", which is the old behaviour
+        and is never wrong, only slower.
+        """
+        browse = getattr(self._sink, "browse", None)
+        if not callable(browse):
+            return None
+        try:
+            page = browse(limit=1, newest_first=True)
+        except Exception as exc:  # noqa: BLE001 - resuming is an optimisation
+            log_event("ingest.resume_failed", level=logging.WARNING, error=repr(exc))
+            return None
+        records = getattr(page, "records", None) or getattr(page, "chunks", None) or []
+        if not records:
+            return None
+        newest = max(r.t_end for r in records)
+        log_event("ingest.resumed", after=to_iso(newest))
+        return newest
+
     def follow(
         self,
+        t_from: datetime | None = None,
         *,
         poll_interval: float | None = None,
         max_passes: int | None = None,
@@ -274,6 +297,11 @@ class IngestPipeline:
         so a window is analysed exactly once. Windows that are not yet complete are not
         emitted at all (``plan_windows``), which is the "wait for the window to close"
         latency floor of SPEC §2.2 rather than a bug.
+
+        ``t_from`` starts the walk somewhere other than the oldest segment on disk. Its
+        use is skipping a backlog to caption the live tail: on a long archive the default
+        re-walks hours of footage — already-indexed footage, on a restart — before it
+        reaches the present. Footage before ``t_from`` is never analysed by this run.
         """
         self.start()
         self._preflight()
@@ -292,7 +320,25 @@ class IngestPipeline:
                     str(self._s.archive_dir), self._s.camera_id, exclude_open=True
                 )
                 if bounds is not None:
-                    start = cursor if cursor is not None else bounds[0]
+                    # max(), not t_from alone: a t_from past the end of the archive would
+                    # otherwise plan nothing until the recorder caught up to it, and a
+                    # t_from before the archive starts would plan windows with no footage.
+                    first = bounds[0] if t_from is None else max(t_from, bounds[0])
+                    if cursor is None and t_from is None:
+                        # RESUME where the index already got to. Without this every
+                        # restart re-walks the archive from its first segment: the walk
+                        # is fast enough to look healthy in the log while the newest
+                        # caption stays hours old, so questions get answered from stale
+                        # footage and nothing says why. Re-captioning also burns the one
+                        # VLM slot on windows that are already indexed.
+                        #
+                        # Derived from the INDEX, not from a cursor file: clearing the
+                        # index has to mean "index it again", and a file would happily
+                        # skip everything it had already seen.
+                        resumed = self._resume_point()
+                        if resumed is not None:
+                            first = max(first, resumed)
+                    start = cursor if cursor is not None else first
                     for window in plan_windows(
                         start,
                         bounds[1],
