@@ -105,8 +105,8 @@ fetches it only if it is not already on disk (it checks your HF cache first).
 ./scripts/start.sh          # everything, in dependency order
 ```
 
-Then open **<http://127.0.0.1:8080/?mode=live>** — the `?mode=live` matters, the page
-defaults to mock fixtures.
+Then open **<http://127.0.0.1:8080/>**. The page detects M3 and runs live; add
+`?mode=mock` to rehearse against the fixtures in `ui/mock/` instead.
 
 **<http://127.0.0.1:8080/browse.html?mode=live>** is the index browser: every analysis
 window the system has written, newest first, paged — the corpus an Ask answer is drawn

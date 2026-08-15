@@ -16,7 +16,17 @@ window.SPARK = window.SPARK || {};
 SPARK.data = (function () {
   "use strict";
 
-  var MODE = "mock"; // <<< THE SWITCH: "mock" | "live" >>>
+  // Resolved by loadConfig(): if /api/config answers, this page is being served by M3
+  // and everything below is real. Mock fixtures are the FALLBACK, not the default.
+  //
+  // It used to be the other way round, from when there was no backend to talk to. The
+  // cost of that default once M3 existed: opening the page without ?mode=live showed a
+  // fully populated console — a live camera pane saying "unavailable", a Timeline of six
+  // invented alerts, a funnel mid-cooldown — all fixtures, with one small pill as the
+  // only warning. A demo surface that convincingly shows fake data by default is worse
+  // than one that fails loudly.
+  var MODE = "mock";
+  var MODE_PINNED = false;
 
   // ---------------------------------------------------------------------------------
   // Endpoint contract (live mode). Relative paths only — no absolute origins anywhere
@@ -44,6 +54,7 @@ SPARK.data = (function () {
   var params = new URLSearchParams(window.location.search);
   if (params.get("mode") === "live" || params.get("mode") === "mock") {
     MODE = params.get("mode");
+    MODE_PINNED = true; // an explicit ?mode= always wins over detection
   }
   // Rehearsal aid: ?speed=4 divides the scripted mock delays. MUST be 1 on stage —
   // the 34.8 s of dead air is part of what the elapsed timer exists to cover.
@@ -133,9 +144,27 @@ SPARK.data = (function () {
   // renders with the operator's actual tunables.
   // ---------------------------------------------------------------------------------
   function loadConfig() {
-    return getJSON(ENDPOINTS.config).catch(function () {
-      return mockJSON("config.json");
-    });
+    if (MODE_PINNED && isMock()) return mockJSON("config.json");
+    // Liveness is decided by an endpoint ONLY M3 serves. /api/config is deliberately NOT
+    // that endpoint: ui/serve.py serves it as well, so probing it would call the mock
+    // previewer "live" and then every other pane would 404 against a server that has no
+    // chunks, no history and no tasks.
+    return getJSON(ENDPOINTS.tasks)
+      .then(function () {
+        if (!MODE_PINNED) MODE = "live";
+      })
+      .catch(function () {
+        // No M3: opened from file://, or ui/serve.py, or the agent is down. Fixtures let
+        // the page still be read and rehearsed, and the mode pill says which it is.
+        if (!MODE_PINNED) MODE = "mock";
+      })
+      .then(function () {
+        // Real settings when anything can supply them — ui/serve.py serves this route
+        // precisely so a mock preview still renders the true timezone and thresholds.
+        return getJSON(ENDPOINTS.config).catch(function () {
+          return mockJSON("config.json");
+        });
+      });
   }
 
   /** Nested lookup with the same dotted-path feel as shared/config.get(). */

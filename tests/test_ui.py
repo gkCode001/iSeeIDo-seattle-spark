@@ -414,3 +414,40 @@ class TestIndexNavLink(unittest.TestCase):
         """Invariant 10 applies to every page, not just the console."""
         for match in re.findall(r"https?://[^\"' )]*", self.browse):
             self.fail(f"remote reference in browse.html: {match}")
+
+
+class TestModeDetection(unittest.TestCase):
+    """The console must not show convincing fake data by default.
+
+    MODE used to default to "mock", from when there was no backend. Once M3 served the
+    page, opening it without ?mode=live produced a fully populated console — a live
+    camera pane reading "unavailable", a Timeline of six invented alerts, a funnel
+    mid-cooldown — all fixtures, with one small pill as the only warning.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.js = (UI_DIR / "static" / "data.js").read_text(encoding="utf-8")
+        cls.loader = cls.js[cls.js.index("function loadConfig()") :][:1600]
+
+    def test_mode_is_detected_rather_than_assumed(self) -> None:
+        self.assertIn('MODE = "live"', self.loader)
+        self.assertIn('MODE = "mock"', self.loader)
+
+    def test_liveness_is_probed_on_an_m3_only_endpoint(self) -> None:
+        """ui/serve.py also serves /api/config, so probing THAT would call the mock
+        previewer live and then 404 every other pane."""
+        self.assertIn("ENDPOINTS.tasks", self.loader)
+        probe = self.loader[: self.loader.index("ENDPOINTS.tasks")]
+        self.assertNotIn("getJSON(ENDPOINTS.config)", probe)
+
+    def test_an_explicit_mode_always_wins(self) -> None:
+        """?mode=mock on a live box is how the demo is rehearsed."""
+        self.assertIn("MODE_PINNED = true", self.js)
+        self.assertIn("MODE_PINNED", self.loader)
+
+    def test_real_settings_are_used_even_in_mock_mode(self) -> None:
+        """ui/serve.py serves /api/config precisely so a mock preview still renders the
+        true timezone and thresholds."""
+        self.assertIn("getJSON(ENDPOINTS.config)", self.loader)
+        self.assertIn("config.json", self.loader)

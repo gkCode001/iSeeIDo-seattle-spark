@@ -157,8 +157,8 @@ cat <<EOF
 
 $(green "Running.")
 
-  UI            http://127.0.0.1:$UI_PORT/?mode=live
-                (?mode=live matters — the page defaults to mock fixtures)
+  UI            http://127.0.0.1:$UI_PORT/
+                (detects M3 and runs live; add ?mode=mock for the fixtures)
 
   logs          $LOG_DIR/{model,recorder,ingest,agent}.log
   stop          ./scripts/stop.sh
