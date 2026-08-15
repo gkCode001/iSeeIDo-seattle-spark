@@ -1520,3 +1520,80 @@ class TestRecentScopeAndWidening(unittest.TestCase):
         self.assertIsNotNone(payload["widen_offer"])
         self.assertIs(payload["escalation"]["deferred"], True)
         self.assertIsNone(payload["job"])
+
+
+class TestTheAnswerIsAnAnswer(unittest.TestCase):
+    """What reaches the Ask pane must be an answer, not the model's working.
+
+    `--reasoning off` stops this model emitting reasoning_content, but it is still a
+    thinking model: the thinking RELOCATES into the answer. The observed failure was
+    "The user is asking if any person was raising a hand. I need to examine the five
+    retrieved captions... 1. ... 2. ..." — truncated mid-list by max_tokens, so the user
+    saw a paragraph of deliberation and no answer.
+
+    The prompt is the fix, so the prompt is what is asserted here. The wording is
+    checked, not the model, because a test that calls the model would be a test of the
+    model.
+    """
+
+    def setUp(self) -> None:
+        self.prompt = AgentSettings.from_config().answer_prompt
+
+    def test_the_answer_must_lead_with_the_answer(self) -> None:
+        self.assertIn("FIRST sentence", self.prompt)
+
+    def test_narration_is_forbidden_by_name(self) -> None:
+        """"No preamble" alone did not hold; the specific failures had to be named."""
+        lowered = self.prompt.lower()
+        self.assertIn("never restate the question", lowered)
+        self.assertIn("never narrate", lowered)
+
+    def test_listing_the_captions_back_is_forbidden(self) -> None:
+        """The enumeration is what ran into the token cap and truncated the answer."""
+        lowered = self.prompt.lower()
+        self.assertIn("never list the captions back", lowered)
+        self.assertIn("no numbered lists", lowered)
+
+
+class TestInlineToolCallShapes(unittest.TestCase):
+    """The model reaches for two spellings of the same mistake — a tool call written
+    into `content` instead of `tool_calls`. Both must be normalised, or one of them is
+    rendered to the user as the provisional answer."""
+
+    def test_the_delimited_shape(self) -> None:
+        from services.agent.llm import _extract_inline_tool_call
+
+        calls, prose = _extract_inline_tool_call(
+            'request_deep_analysis{question:<|"|>was the door open?<|"|>,'
+            'why:<|"|>the captions do not record it<|"|>}'
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("<|", prose)
+
+    def test_the_parenthesised_shape(self) -> None:
+        from services.agent.llm import _extract_inline_tool_call
+
+        calls, prose = _extract_inline_tool_call(
+            'request_deep_analysis(t_start="2026-08-15T23:18:26Z", '
+            't_end="2026-08-15T23:18:31Z", question="how many fingers?")'
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0].arguments["t_start"], "2026-08-15T23:18:26Z")
+        self.assertNotIn("request_deep_analysis(", prose)
+
+    def test_prose_containing_parentheses_is_left_alone(self) -> None:
+        """Conservative on purpose — ordinary writing uses brackets."""
+        from services.agent.llm import _extract_inline_tool_call
+
+        answer = "She waved (twice) at the camera."
+        calls, prose = _extract_inline_tool_call(answer)
+        self.assertEqual(calls, [])
+        self.assertEqual(prose, answer)
+
+    def test_merely_naming_the_tool_is_not_a_call(self) -> None:
+        from services.agent.llm import _extract_inline_tool_call
+
+        calls, _ = _extract_inline_tool_call(
+            "I could use request_deep_analysis for this, but the captions cover it."
+        )
+        self.assertEqual(calls, [])

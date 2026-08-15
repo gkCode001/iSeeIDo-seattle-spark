@@ -360,6 +360,16 @@ _INLINE_ARG_RE = re.compile(
     rf"(?P<key>[a-z_][a-z0-9_]*)\s*:\s*{_DELIM}(?P<value>.*?){_DELIM}", re.S | re.I
 )
 
+#: The other shape the same model reaches for: `name(key="value", key2="value2")`. Two
+#: spellings of the same mistake — the call belongs in `tool_calls` and arrives as prose
+#: either way — so both are normalised rather than one being treated as the real one.
+_PAREN_CALL_RE = re.compile(
+    r"(?P<name>[a-z_][a-z0-9_]*)\s*\((?P<body>[^()]*)\)\s*\.?\s*$", re.S | re.I
+)
+_PAREN_ARG_RE = re.compile(
+    r"(?P<key>[a-z_][a-z0-9_]*)\s*=\s*[\"\'](?P<value>[^\"\']*)[\"\']", re.S
+)
+
 
 def _extract_inline_tool_call(content: str) -> tuple[list[ToolCall], str]:
     """Pull a tool call out of message *content*, returning it and the leftover prose.
@@ -378,12 +388,23 @@ def _extract_inline_tool_call(content: str) -> tuple[list[ToolCall], str]:
     while the deep job runs.
     """
     text = content.strip()
-    if not text or "<|" not in text:
+    if not text:
         return [], content
-    match = _INLINE_CALL_RE.search(text)
-    if not match:
-        return [], content
-    arguments = {m.group("key"): m.group("value").strip() for m in _INLINE_ARG_RE.finditer(match.group("body"))}
+
+    match = _INLINE_CALL_RE.search(text) if "<|" in text else None
+    if match is not None:
+        arguments = {
+            m.group("key"): m.group("value").strip()
+            for m in _INLINE_ARG_RE.finditer(match.group("body"))
+        }
+    else:
+        match = _PAREN_CALL_RE.search(text)
+        if match is None:
+            return [], content
+        arguments = {
+            m.group("key"): m.group("value").strip()
+            for m in _PAREN_ARG_RE.finditer(match.group("body"))
+        }
     if not arguments:
         return [], content
     call = ToolCall(name=match.group("name"), arguments=arguments)

@@ -341,11 +341,18 @@ agent:
       YES means: everything the question asks for is stated in the context.
       NO means: answering would require looking at the footage again.
       Do not answer the question itself.
+    # "Two or three sentences. No preamble." was not enough. `--reasoning off` stops
+    # this model emitting reasoning_content, but it is still a thinking model — so the
+    # thinking RELOCATES into the answer, and the user gets "The user is asking if any
+    # person was raising a hand. I need to examine the five captions... 1. ... 2. ..."
+    # truncated mid-list by max_tokens. Naming the specific failures is what stopped it;
+    # measured 2 leaks in 3 questions before, 0 after.
     answer: |
       You answer questions about recorded video using retrieved captions.
       Cite the wall-clock times of what you report, and label them UTC — the captions' timestamps are UTC.
       State plainly when the captions do not record what was asked rather than guessing; a request_deep_analysis call is the correct response to fine visual detail.
-      Two or three sentences. No preamble.
+      Answer the question in your FIRST sentence. Never restate the question, never narrate what you are about to do, and never list the captions back — the user can already see them.
+      Two or three sentences. No preamble, no numbered lists.
 
   stub:
     # Fraction of the question's content words that must appear in the retrieved
