@@ -20,6 +20,14 @@ GB10, sm_121, aarch64, Ubuntu 24.04.4, driver 580.173.02, 121 GB unified memory,
 6.1.1 with working `h264_nvenc` (verified — it encoded the test archive), Docker
 29.2.1, git, rsync. No NGC key, no LM Studio — neither is needed.
 
+Network: the box is on WiFi and reachable over **Tailscale** (the
+`tail719b8c.ts.net` search domain is why `gn100-2f74` resolves from elsewhere).
+Its upstream DNS (OpenDNS) was found dead on 2026-08-15 while HTTPS worked —
+fixed with a resolved drop-in at `/etc/systemd/resolved.conf.d/50-working-dns.conf`
+(1.1.1.1 / 8.8.8.8), which survives reboots. `git fetch` from the box needs
+GitHub auth (`gh auth login` or a token) — the repo is private; the working copy
+here is already at `origin/main` regardless.
+
 Memory note: the two model servers commit ~64 GB between them. The app itself
 adds 1–2 GB. Never start another model process — CLAUDE.md invariant 1. The
 unused extras were already stopped and disabled to free memory:
