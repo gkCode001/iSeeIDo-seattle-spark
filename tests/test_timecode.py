@@ -435,9 +435,25 @@ class TestClockDrift(ArchiveFixture):
 
 class TestLocalTime(unittest.TestCase):
     def test_uses_configured_timezone_and_format(self) -> None:
+        # Derived from config rather than hardcoded to one city's offset. What this test
+        # is for is that `to_local` reads `ui.display_timezone` at all — pinning the
+        # offset here only asserts where the box happens to sit, and makes moving the
+        # camera to another city look like a timecode regression. The DST cases below
+        # pin their own zones, because those are about the arithmetic, not the config.
         dt = utc(2026, 8, 14, 21, 11, 7)
-        self.assertEqual(tc.to_local(dt).utcoffset(), timedelta(hours=5, minutes=30))
-        self.assertEqual(tc.format_local(dt), "02:41:07")
+        zone = ZoneInfo(str(config.get("ui.display_timezone")))
+        expected = dt.astimezone(zone)
+        self.assertEqual(tc.to_local(dt).utcoffset(), expected.utcoffset())
+        self.assertEqual(
+            tc.format_local(dt), expected.strftime(str(config.get("ui.time_format")))
+        )
+        if expected.utcoffset() != timedelta(0):
+            self.assertNotEqual(
+                tc.format_local(dt),
+                tc.format_local(dt, tz="UTC"),
+                "a non-UTC display zone must render differently from UTC, or the "
+                "conversion is not happening",
+            )
 
     def test_conversion_preserves_the_instant(self) -> None:
         dt = utc(2026, 8, 14, 21, 11, 7)

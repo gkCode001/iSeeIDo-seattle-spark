@@ -425,7 +425,7 @@ monitor:
 # UI — SPEC §11
 # --------------------------------------------------------------------------------------
 ui:
-  display_timezone: Asia/Kolkata # the ONLY place local time is allowed (SPEC §11.5)
+  display_timezone: America/Los_Angeles # the ONLY place local time is allowed (SPEC §11.5)
   time_format: "%H:%M:%S"
   poll_interval_ms: 1000
   # SPEC §11.1 / CLAUDE.md invariant 10 — the demo runs with the network off.

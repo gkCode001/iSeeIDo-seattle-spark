@@ -822,3 +822,79 @@ class TestSettings(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCorpusIsSharedBetweenProcesses(unittest.TestCase):
+    """The in-memory backend is shared BETWEEN PROCESSES through its JSONL file.
+
+    Ingest writes it; M3 and M5 read it. A reader that loads once is frozen at its own
+    start time — and the failure is invisible, because it keeps answering correctly from
+    whatever existed when it booted and gets quietly more wrong the longer it runs. The
+    symptom was a console started at 23:00 whose newest indexed caption stayed 22:59
+    while the file reached 23:10.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="shared-"))
+        self.path = self.tmp / "index.jsonl"
+
+    def _store(self) -> IndexStore:
+        settings = replace(
+            IndexSettings.from_config(), store_backend="memory", memory_path=self.path
+        )
+        store = IndexStore(
+            backend=InMemoryBackend(settings.embed_dims, self.path),
+            embedder=HashingEmbedder(settings.embed_dims),
+            reranker=LexicalReranker(),
+            settings=settings,
+        )
+        store.ensure_ready()
+        self.addCleanup(store.close)
+        return store
+
+    def _chunk(self, offset: int) -> ChunkRecord:
+        t_start = SEGMENT_START + timedelta(seconds=offset)
+        return ChunkRecord(
+            chunk_id=chunk_id_for(CAMERA, t_start, t_start + timedelta(seconds=5)),
+            camera_id=CAMERA,
+            t_start=t_start,
+            t_end=t_start + timedelta(seconds=5),
+            segment=SEGMENT,
+            pts_offset=float(offset),
+            caption=f"a person walks past at offset {offset}",
+        )
+
+    def test_a_reader_sees_what_a_writer_appended_after_it_started(self) -> None:
+        writer = self._store()
+        writer.insert([self._chunk(0)])
+
+        reader = self._store()          # a second process, started now
+        self.assertEqual(reader.browse(limit=10).total, 1)
+
+        writer.insert([self._chunk(60)])  # ingest keeps going
+        # The reader must pick it up WITHOUT being restarted.
+        self.assertEqual(reader.browse(limit=10).total, 2)
+
+    def test_the_reader_tracks_the_newest_record(self) -> None:
+        writer = self._store()
+        writer.insert([self._chunk(0)])
+        reader = self._store()
+        writer.insert([self._chunk(120)])
+        newest = reader.browse(limit=1, newest_first=True).records[0]
+        self.assertEqual(newest.pts_offset, 120.0)
+
+    def test_search_sees_late_arrivals_too(self) -> None:
+        """Reading through browse but not through search would be worse than neither."""
+        writer = self._store()
+        reader = self._store()
+        writer.insert([self._chunk(0)])
+        self.assertTrue(reader.search("person walks past"))
+
+    def test_an_unchanged_file_is_not_reparsed(self) -> None:
+        """The check runs on every read, so it has to be a stat, not a parse."""
+        store = self._store()
+        store.insert([self._chunk(0)])
+        before = store.browse(limit=10).total
+        self.path.chmod(0o444)           # any re-read would still succeed; assert stability
+        self.addCleanup(self.path.chmod, 0o644)
+        self.assertEqual(store.browse(limit=10).total, before)

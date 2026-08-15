@@ -251,20 +251,55 @@ class InMemoryBackend:
         self._gated: dict[str, ChunkRecord] = {}
         self._norms: dict[str, float] = {}
         self._loaded = False
+        #: (size, mtime_ns) of the corpus as we last read it. The in-memory backend is
+        #: shared BETWEEN PROCESSES through this file — ingest writes it, M3 and M5 read
+        #: it — so a reader that loads once is frozen at its own start time. That is not
+        #: a stale cache in the usual sense: the console kept answering, correctly, from
+        #: whatever existed when it booted, and got quietly more wrong the longer it ran.
+        self._stamp: tuple[int, int] | None = None
 
     # -- lifecycle ---------------------------------------------------------------
 
     def ensure_ready(self) -> None:
-        if self._loaded:
+        """Load the corpus, and RE-load it when the writer has moved on.
+
+        Cheap enough to call on every read: the check is one stat(), and a re-read only
+        happens when size or mtime actually changed. The alternative — a reader that
+        loads once — means M3 answers from the index as it was when M3 started, which is
+        indistinguishable from "the model is ignoring recent footage" and is exactly how
+        a two-hour-old answer looks confident.
+        """
+        if not self._path:
+            self._loaded = True
             return
-        self._loaded = True
-        if self._path and self._path.is_file():
+        try:
+            stat = self._path.stat()
+            stamp = (stat.st_size, stat.st_mtime_ns)
+        except FileNotFoundError:
+            self._loaded = True
+            return
+        if self._loaded and stamp == self._stamp:
+            return
+        try:
             with self._path.open("r", encoding="utf-8") as fh:
-                records = [ChunkRecord.from_dict(json.loads(line)) for line in fh if line.strip()]
-            self._absorb(records)
-            log_event(
-                "index.memory.loaded", path=str(self._path), records=len(records)
-            )
+                records = [
+                    ChunkRecord.from_dict(json.loads(line)) for line in fh if line.strip()
+                ]
+        except (OSError, json.JSONDecodeError) as exc:
+            # A reader catching the writer mid-rewrite. Keep what we have and try again
+            # on the next read rather than emptying a working index.
+            log_event("index.memory.reload_skipped", path=str(self._path), error=repr(exc))
+            self._loaded = True
+            return
+        # Absorb rather than replace: upsert() keys on chunk_id, so a record this process
+        # wrote and has not yet persisted is not lost by a reload.
+        self._absorb(records)
+        self._stamp = stamp
+        if self._loaded:
+            log_event("index.memory.reloaded", path=str(self._path), records=len(records))
+        else:
+            log_event("index.memory.loaded", path=str(self._path), records=len(records))
+        self._loaded = True
 
     def close(self) -> None:
         self._persist()

@@ -33,6 +33,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from shared import config
 from shared.schema import (
@@ -69,10 +70,27 @@ STAGE1_THRESHOLD = float(config.get("monitor.stage1_cosine_threshold"))
 CAMERA_ID = str(config.get("camera.id"))
 DISPLAY_TZ = str(config.get("ui.display_timezone"))
 
-#: 21:11:07 in the configured display timezone (Asia/Kolkata, UTC+5:30) — the hour SPEC
-#: §11.3's mock-up alerts at, and comfortably inside ``18:00-06:00``. Every assertion below
-#: is reproducible from it.
-T0 = datetime(2026, 8, 14, 15, 41, 7, tzinfo=timezone.utc)
+def local_utc(year: int, month: int, day: int, hour: int, minute: int, second: int = 0):
+    """The UTC instant for a *local* wall clock in ``ui.display_timezone``.
+
+    Half this file is about ``Task.active``, which is defined in local hours, so the
+    instants that matter are local ones — but every API here takes UTC. Pinning the UTC
+    side instead ("15:41Z, which is 21:11 in Kolkata") unpins the local side the moment
+    the display zone changes, and the entire suite then fails as "nothing fired" with
+    nothing pointing at the timezone.
+
+    Local-naive → UTC is the direction ``shared.timecode`` deliberately does not offer,
+    because inside a DST fold there is no correct answer. That constraint is about
+    instants an operator did not choose; here the dates are fixed and away from any
+    transition, and ``ActiveWindowTest`` asserts these anchors land where claimed.
+    """
+    zone = ZoneInfo(str(config.get("ui.display_timezone")))
+    return datetime(year, month, day, hour, minute, second, tzinfo=zone).astimezone(timezone.utc)
+
+
+#: 21:11:07 local — the hour SPEC §11.3's mock-up alerts at, and comfortably inside
+#: ``18:00-06:00``. Every assertion below is reproducible from it.
+T0 = local_utc(2026, 8, 14, 21, 11, 7)
 
 #: Captions the stub backends can separate. The fire-door one scores ~0.64 cosine against
 #: its task and ~0.11 against the loading-bay task, so stage 1 genuinely filters rather
@@ -652,13 +670,23 @@ class ActiveWindowTest(unittest.TestCase):
     def test_resolved_against_the_display_timezone_not_utc(self) -> None:
         """The whole point: "overnight" means the operator's night, not UTC's."""
         overnight = parse_active_window("18:00-06:00")
-        # Asia/Kolkata is UTC+5:30, so 21:11 local is 15:41 UTC — a time that is plainly
-        # daytime in UTC and would be excluded by a naive UTC comparison.
-        self.assertTrue(overnight.contains(T0, DISPLAY_TZ))
-        self.assertFalse(
-            overnight.contains(T0, "UTC"),
-            "15:41 UTC is outside 18:00-06:00 in UTC; the test is only meaningful "
-            "because the two zones disagree",
+        # Local anchors, with what each must mean to someone reading a wall clock.
+        anchors = [
+            (T0, True),  # 21:11 — evening, inside
+            (local_utc(2026, 8, 14, 2, 0), True),  # small hours, inside via the wrap
+            (local_utc(2026, 8, 14, 12, 0), False),  # noon, plainly outside
+        ]
+        for instant, inside in anchors:
+            with self.subTest(instant=instant.isoformat()):
+                self.assertEqual(overnight.contains(instant, DISPLAY_TZ), inside)
+
+        # ...and this only proves anything if UTC would answer differently somewhere.
+        # *Which* anchor disagrees depends on the offset, so assert that a disagreement
+        # exists rather than naming the anchor that happens to carry it in one city.
+        self.assertNotEqual(
+            [overnight.contains(i, DISPLAY_TZ) for i, _ in anchors],
+            [overnight.contains(i, "UTC") for i, _ in anchors],
+            f"{DISPLAY_TZ} and UTC agree on every anchor; this test proves nothing",
         )
 
 
@@ -670,8 +698,8 @@ class ActiveWindowFunnelTest(MonitorTestCase):
 
     def test_out_of_hours_chunks_are_not_evaluated_at_all(self) -> None:
         monitor = self.build_monitor([self._fire_door()])
-        # 12:00 local = 06:30 UTC — the middle of the excluded half of 18:00-06:00.
-        noon_local = datetime(2026, 8, 14, 6, 30, 0, tzinfo=timezone.utc)
+        # Midday: the middle of the excluded half of 18:00-06:00, in any zone.
+        noon_local = local_utc(2026, 8, 14, 12, 0, 0)
         outcomes = self.feed(monitor, make_chunks(noon_local, 60, FIRE_DOOR_CAPTION))
 
         self.assertEqual(len(self.originals_for("fire-door-blocked")), 0)
@@ -685,9 +713,9 @@ class ActiveWindowFunnelTest(MonitorTestCase):
         self.assertEqual(row.state, "out_of_window")
 
     def test_the_window_wraps_midnight_in_local_time(self) -> None:
-        """02:00 local is inside "18:00-06:00" and is 20:30 UTC the *previous* day."""
+        """02:00 local is inside "18:00-06:00", and lands on a different UTC date."""
         monitor = self.build_monitor([self._fire_door()])
-        two_am_local = datetime(2026, 8, 13, 20, 30, 0, tzinfo=timezone.utc)
+        two_am_local = local_utc(2026, 8, 14, 2, 0, 0)
         self.feed(monitor, make_chunks(two_am_local, 40, FIRE_DOOR_CAPTION))
 
         self.assertEqual(len(self.originals_for("fire-door-blocked")), 1)
@@ -696,8 +724,8 @@ class ActiveWindowFunnelTest(MonitorTestCase):
     def test_leaving_the_window_breaks_a_sustained_run(self) -> None:
         """A run that straddles 06:00 local must not promote on out-of-hours footage."""
         monitor = self.build_monitor([self._fire_door()])
-        # Start 90 s before 06:00 local (= 00:30 UTC): not enough for the 120 s window.
-        start = datetime(2026, 8, 14, 0, 28, 30, tzinfo=timezone.utc)
+        # Start 90 s before 06:00 local: not enough runway for the 120 s window.
+        start = local_utc(2026, 8, 14, 5, 58, 30)
         self.feed(monitor, make_chunks(start, 60, FIRE_DOOR_CAPTION))
 
         self.assertEqual(len(self.originals_for("fire-door-blocked")), 0)

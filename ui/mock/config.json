@@ -57,7 +57,7 @@
     "default_cooldown_seconds": 300
   },
   "ui": {
-    "display_timezone": "Asia/Kolkata",
+    "display_timezone": "America/Los_Angeles",
     "time_format": "%H:%M:%S",
     "poll_interval_ms": 1000,
     "vendored_assets_only": true
