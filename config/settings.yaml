@@ -172,15 +172,20 @@ vlm:
   # `stub` returns deterministic synthetic captions so the pipeline can run before a
   # model is serving. It is NOT a test mock. Now resolved — a real model is serving.
   backend: vllm                  # stub | vllm
-  endpoint: http://localhost:8000/v1
-  # SPEC §10 D1 — RESOLVED 2026-08-15 by the block-0 benchmark (see below).
-  # gemma-4-E2B-it, Q4_K_XL + mmproj-F16: ~4 GB resident. Chosen on the one axis that
-  # governs the live path — decode is bandwidth-bound, so 273 GB/s ÷ ~4 GB ≈ 68 tok/s,
-  # and 80 tokens lands inside SPEC §2.4's ~2 s budget. The 15-30 GB vision models also
-  # on this box are 4-8x slower per token and cannot hold a 4 s stride.
-  # Served by the CUDA-13 ARM64 llama-server bundled with LM Studio — a prebuilt sm_121
-  # binary, which is exactly what CLAUDE.md says to verify before committing.
-  model: gemma-4-E2B-it-UD-Q4_K_XL.gguf
+  # gn100-2f74: the box's own provisioning serves this model via vLLM (systemd unit
+  # `gn100-vlm.service`, NGC vLLM container). We start no model process — invariant 1.
+  endpoint: http://localhost:8082/v1
+  # SPEC §10 D1 — RE-RESOLVED 2026-08-15 on gn100-2f74, by the same block-0 rule.
+  # Nemotron Nano 12B v2 VL (NVFP4), measured warm on this box: 1 image 2.0 s,
+  # 5 images 3.0 s — inside the 4 s live cap. Cold first call is ~26 s; warm it before
+  # judging latency. finish_reason=stop with no reasoning spill, unprompted.
+  # Server limits that bind us (its launch flags, raised by us 2026-08-15 in
+  # /etc/systemd/system/gn100-vlm.service, backup at /root/gn100-vlm.service.bak):
+  # 40960 ctx, max 16 images @<=1920x1080, max-num-seqs 1. ~780 prompt tokens per
+  # 512px frame; native 1080p frames cost several times that — budget before raising
+  # deep.sample_fps. NOTE: the VL container joins nemoclaw-vllm's network namespace,
+  # so restarting nemoclaw-vllm kills the VL server's networking too.
+  model: nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-NVFP4-QAD
   precision: bf16                # quantized Cosmos Reason variants hallucinate
 
   # Fallback HTTP timeout. Per-profile values below take precedence. Something must be
@@ -211,7 +216,11 @@ vlm:
       enable_reasoning: true
       max_tokens: 600            # ~35 s of decode at 17 tok/s. Do not raise casually.
       temperature: 0.0
-      sample_fps: 4
+      # gn100-2f74: sized to the VL server's 16-image cap, not to taste. Max deep range
+      # is 25 s + 2x5 s pad = 35 s; 0.4 fps x 35 s = 14 frames <= 16. The frames are
+      # native 1080p (invariant 7), so each carries far more detail than a live frame —
+      # the tradeoff is temporal density, which the burned clock partly buys back.
+      sample_fps: 0.4
       native_resolution: true
       # Deliberately longer than the 90 s job timeout the user is shown (SPEC §4.3), so
       # that the job-level timeout fires first with a sentence instead of the transport
@@ -282,16 +291,22 @@ index:
 # Ask agent — SPEC §4
 # --------------------------------------------------------------------------------------
 agent:
-  # SPEC §10 D3 — RESOLVED 2026-08-15. Neither Nemotron variant was reachable (no NGC
-  # key, and no ARM64/sm_121 container could be verified). The live VLM is multimodal
-  # and answers text-only prompts perfectly well, so M3 and M5 stage-2 share the SAME
-  # served model and the SAME process as the VLM.
-  # This is stricter than SPEC §7's two-process design, not looser: invariant 1 exists
-  # because a second model instance OOMs the box, and one process makes that impossible.
-  # The priority queue already arbitrates the contention — that is what it is for.
-  model: gemma-4-E2B-it-UD-Q4_K_XL.gguf
-  backend: nim                   # stub | nim (OpenAI-compatible; llama-server speaks it)
-  endpoint: http://localhost:8000/v1   # same llama-server as the VLM — one process
+  # SPEC §10 D3 — RE-RESOLVED 2026-08-15 on gn100-2f74: Nemotron 3.5 Lightning, the
+  # variant SPEC named, served by the box's own `nemoclaw-vllm` container. This restores
+  # SPEC §7's two-process design; invariant 1 still holds because BOTH model processes
+  # are externally managed — we start zero.
+  model: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+  backend: nim                   # stub | nim (OpenAI-compatible; vLLM speaks it)
+  endpoint: http://localhost:8000/v1   # the box's Lightning vLLM, not ours to spawn
+  # Merged verbatim into every chat-completion body. Load-bearing, measured 2026-08-15:
+  # Lightning is a hybrid reasoner and WITHOUT this it writes "Here's a thinking
+  # process:" into `content` itself — 466 tokens of it — so the groundedness gate's
+  # YES/NO first-line parse breaks. This is invariant 6's failure mode on the ask path,
+  # and per-request kwargs are the only switch vLLM offers at runtime (the /no_think
+  # and "detailed thinking off" system prompts were both tested and do nothing).
+  extra_body:
+    chat_template_kwargs:
+      enable_thinking: false
   max_tokens: 512
   host: 0.0.0.0
   port: 8080

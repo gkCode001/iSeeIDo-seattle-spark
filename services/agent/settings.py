@@ -60,6 +60,11 @@ class AgentSettings:
     max_tokens: int
     temperature: float
     request_timeout: float
+    # Server-specific request fields merged verbatim into every chat completion.
+    # Load-bearing with a hybrid reasoner behind a server we don't launch: vLLM's
+    # chat_template_kwargs.enable_thinking=false is the only switch that stops
+    # Nemotron 3.5 Lightning spending its budget on in-band "thinking" text.
+    extra_body: dict[str, object]
 
     # --- escalation (SPEC §4.2 / §4.3) --------------------------------------------
     groundedness_gate: bool
@@ -115,6 +120,7 @@ class AgentSettings:
             max_tokens=int(config.get("agent.max_tokens")),
             temperature=float(_pending("agent.temperature")),  # type: ignore[arg-type]
             request_timeout=float(_pending("agent.request_timeout_seconds")),  # type: ignore[arg-type]
+            extra_body=dict(config.get("agent.extra_body", {}) or {}),
             groundedness_gate=bool(config.get("agent.groundedness_gate")),
             deep_timeout_seconds=float(config.get("agent.deep.timeout_seconds")),
             deep_max_inflight=int(config.get("agent.deep.max_inflight")),

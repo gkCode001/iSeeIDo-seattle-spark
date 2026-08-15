@@ -258,6 +258,8 @@ class OpenAICompatBackend:
         if request.tools:
             payload["tools"] = [dict(t) for t in request.tools]
             payload["tool_choice"] = "auto"
+        if self._s.extra_body:
+            payload.update(self._s.extra_body)
 
         started = time.perf_counter()
         try:
