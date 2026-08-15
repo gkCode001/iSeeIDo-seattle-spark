@@ -376,3 +376,41 @@ class TestStandingTaskForm(unittest.TestCase):
         """A partly-filled task left behind would reappear later looking real."""
         handler = self.js[self.js.index("data-watch-cancel") :][:700]
         self.assertIn("reset()", handler)
+
+
+class TestIndexNavLink(unittest.TestCase):
+    """The console links to the index browser, and must not navigate away to get there.
+
+    Both live panes are stateful: the Ask log, an in-flight deep job and the live camera
+    poll all live in the console document. Following a same-tab link mid-escalation
+    throws away the provisional/refined pair that is the point of the demo.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.console = (UI_DIR / "index.html").read_text(encoding="utf-8")
+        cls.browse = (UI_DIR / "browse.html").read_text(encoding="utf-8")
+
+    def _anchor(self, html: str, href: str) -> str:
+        start = html.index(f'href="{href}"')
+        return html[html.rindex("<a", 0, start) : html.index(">", start) + 1]
+
+    def test_the_index_link_opens_a_new_tab(self) -> None:
+        anchor = self._anchor(self.console, "browse.html")
+        self.assertIn('target="_blank"', anchor)
+
+    def test_the_new_tab_cannot_reach_back_through_window_opener(self) -> None:
+        anchor = self._anchor(self.console, "browse.html")
+        self.assertIn('rel="noopener"', anchor)
+
+    def test_the_browse_page_still_links_back_in_place(self) -> None:
+        """Opened directly or bookmarked, the browser page must be able to navigate to
+        the console normally rather than spawning yet another tab."""
+        self.assertIn('href="index.html"', self.browse)
+        anchor = self._anchor(self.browse, "index.html")
+        self.assertNotIn("target=", anchor)
+
+    def test_the_browse_page_ships_no_remote_assets_either(self) -> None:
+        """Invariant 10 applies to every page, not just the console."""
+        for match in re.findall(r"https?://[^\"' )]*", self.browse):
+            self.fail(f"remote reference in browse.html: {match}")

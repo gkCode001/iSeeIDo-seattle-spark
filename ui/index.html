@@ -30,7 +30,19 @@
       <div class="topbar-right">
         <!-- The corpus behind every answer on this page: one row per analysis window,
              gate-skipped ones included. -->
-        <a class="pill pill--quiet" href="browse.html" title="browse the index — every caption, paged">index ↗</a>
+        <!-- New tab, deliberately: the live panes are stateful. The Ask log, an
+             in-flight deep job and the live camera poll all live in THIS document, so
+             navigating away mid-escalation loses the provisional/refined pair the demo
+             exists to show. rel="noopener" because a new tab otherwise gets a handle on
+             window.opener. -->
+        <a
+          class="pill pill--quiet"
+          href="browse.html"
+          target="_blank"
+          rel="noopener"
+          title="browse the index — every caption, paged (opens a new tab)"
+          >index ↗</a
+        >
         <span class="pill" data-mode-pill>…</span>
         <span class="pill pill--quiet" data-tz-pill>…</span>
         <span class="pill pill--quiet" data-clock-pill>--:--:--</span>
