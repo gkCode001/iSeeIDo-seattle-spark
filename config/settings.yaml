@@ -191,11 +191,22 @@ vlm:
   prompts:
     # Caption text lives here so M1 and the rollup job cannot drift to different
     # prompts and quietly produce two incomparable caption styles in one index.
+    # Measured on 1,149 live captions before this wording: 98% of them described the
+    # burned-in clock, spending a median 10 of 42 words — a QUARTER of the budget — on
+    # narrating our own overlay, while only 25% mentioned an action at all. The overlay
+    # exists so the MODEL can read it for temporal localization (invariant 8); the index
+    # already stores exact t_start/t_end, so citing it back is pure waste. The old line
+    # "If a timestamp is burned into the frame, cite it" is what caused it.
+    #
+    # Raising max_tokens was the alternative and is the worse trade: decode is ~95% of
+    # cost (SPEC §2.4), so 80 -> 160 tokens roughly doubles caption latency and halves
+    # the headroom the deep worker shares. Recovering the wasted quarter is free.
     caption: >-
-      Describe what is happening in this scene in at most two short sentences.
-      State the objects, people and vehicles present and what they are doing.
-      If a timestamp is burned into the frame, cite it. Report only what is
-      visible; do not speculate about intent.
+      Describe what is happening in at most two short sentences.
+      Lead with what people are DOING — actions, gestures, movement, and how many
+      people there are. Name objects, colours and clothing only when they matter to
+      the action. Do NOT describe or quote the timestamp burned into the frame.
+      Report only what is visible; do not speculate about intent.
     deep: >-
       Watch this footage closely and answer the question. Cite the burned-in
       timestamps for anything you report. If the footage does not show enough
@@ -396,7 +407,20 @@ agent:
 # --------------------------------------------------------------------------------------
 monitor:
   tasks_file: config/tasks.yaml
-  stage1_cosine_threshold: 0.35  # deliberately loose — over-trigger here, filter later
+  # Deliberately loose — over-trigger here, filter later (SPEC §6.2). 0.35 was NOT loose
+  # against `index.embed.backend: hashing`, which is bag-of-words: it scores literal word
+  # overlap diluted by caption length, so "a red band is visible on the wrist" scored
+  # 0.18 against a task describing exactly that, and "red wristbands" scored 0.07 because
+  # `wristband` and `band` are simply different tokens. Measured over 600 captioned
+  # windows of real footage, describe "a person wearing a red wristband":
+  #   0.35 -> caught 1 of 23 true events, 0 false positives
+  #   0.20 -> caught 9 of 23,             0 false positives
+  #   0.15 -> caught 12 of 23,            4 of 577 (1%) false positives
+  #   0.10 -> caught 14 of 23,           50 of 577 (9%) false positives
+  # 0.15 buys half the recall for 1% leakage, which is precisely what stage 2's LLM is
+  # there to reject. RAISE THIS BACK toward 0.35 if `embed.backend` ever becomes `nim` —
+  # a real semantic embedder separates these classes far better and this would be slack.
+  stage1_cosine_threshold: 0.15
   stage2_sustain_default: 120
   default_cooldown_seconds: 300
   dedupe_overlap_seconds: 5      # consecutive chunks share 1 s and double-report

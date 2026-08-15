@@ -29,3 +29,19 @@ tasks:
     cooldown: 120
     active: "00:00-24:00"
     enabled: true
+
+  # Registered live through the §11.3 form, then written here because a runtime
+  # registration lives only in the running monitor — the agent restarted and it was gone.
+  #
+  # `describe` is worded from the CAPTIONS, not from the event. Stage 1 compares this
+  # against caption text through a bag-of-words embedder, so it matches the words the VLM
+  # actually writes ("wearing a red wristband") rather than the words a person would use
+  # to describe what they saw ("having red band on hand", which scored 0.07-0.26 and never
+  # once cleared the gate). Reword this from real captions, not from the scene.
+  - task_id: red-tag-person
+    describe: a person wearing a red wristband
+    window: 5
+    action: raise_alert
+    cooldown: 300
+    active: "00:00-24:00"
+    enabled: true

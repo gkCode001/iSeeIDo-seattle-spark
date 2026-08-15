@@ -52,7 +52,7 @@
     }
   },
   "monitor": {
-    "stage1_cosine_threshold": 0.35,
+    "stage1_cosine_threshold": 0.15,
     "stage2_sustain_default": 120,
     "default_cooldown_seconds": 300
   },

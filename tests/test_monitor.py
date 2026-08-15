@@ -741,7 +741,12 @@ class RegistryTest(MonitorTestCase):
     def test_seed_is_the_cold_start_and_is_read_not_retyped(self) -> None:
         monitor = self.build_monitor()
         ids = [t.task_id for t in monitor.tasks()]
-        self.assertEqual(ids, ["fire-door-blocked", "loading-bay-activity"])
+        # Present, not exhaustive. config/tasks.yaml is operator-editable — it is where
+        # SPEC §10 D5 says to persist a task registered through the §11.3 form so it
+        # survives a restart. Pinning the exact list makes "an operator added a standing
+        # task", the thing this system is for, indistinguishable from a seeding bug.
+        self.assertIn("fire-door-blocked", ids)
+        self.assertIn("loading-bay-activity", ids)
         for task in monitor.tasks():
             self.assertTrue(task.embedding, "describe is embedded once, at registration")
             self.assertEqual(len(task.embedding), self.embedder.dims)
@@ -821,9 +826,17 @@ class MonitorStateContractTest(MonitorTestCase):
 
     def test_shape_matches_the_ui_fixture(self) -> None:
         live = self._live_state()
+        # Compared one row deep on each side. This asserts FIELD NAMES, which is what the
+        # Watch pane is written against; how many standing tasks the seed file happens to
+        # carry is an operator's business and would otherwise fail this as a shape drift.
+        def one_row(state: dict) -> dict:
+            return {**state, "tasks": state["tasks"][:1]}
+
+        self.assertTrue(live["tasks"], "live state must carry at least one task row")
+        self.assertTrue(self.mock["tasks"], "the fixture must carry at least one task row")
         self.assertEqual(
-            key_shape({k: v for k, v in self.mock.items() if not k.startswith("_")}),
-            key_shape({**live, "tasks": live["tasks"]}),
+            key_shape(one_row({k: v for k, v in self.mock.items() if not k.startswith("_")})),
+            key_shape(one_row(live)),
             "GET /api/monitor/state must match ui/mock/monitor_state.json; the Watch pane "
             "is already written against these names",
         )
@@ -883,10 +896,11 @@ class BuildMonitorTest(unittest.TestCase):
                 ),
                 clock=clock,
             )
-            self.assertEqual(
-                [t.task_id for t in monitor.tasks()],
-                ["fire-door-blocked", "loading-bay-activity"],
-            )
+            # Present, not exhaustive — see RegistryTest above: the seed file is
+            # operator-editable, so an added standing task is not a wiring failure.
+            seeded = [t.task_id for t in monitor.tasks()]
+            self.assertIn("fire-door-blocked", seeded)
+            self.assertIn("loading-bay-activity", seeded)
             # build_monitor picks stage 2 from `agent.backend` — the SAME key M3 reads,
             # so the two surfaces can never end up on different models. Assert the
             # SELECTION, not a fixed value: SPEC §10 D3 is resolved to `nim` now, and a
