@@ -5,7 +5,38 @@ shared index: an **ask** agent (question → instant answer, or escalate to a wo
 that re-watches the footage) and a **watch** monitor (standing tasks → MCP actions).
 
 Full design in `SPEC.md`. Read §2–§3 before touching ingest or the schema, and §11
-before touching the UI.
+before touching the UI. `ARCHITECTURE.md` is the plain-language walkthrough with
+diagrams; `README.md` has current build status and per-module test counts.
+
+## Module map
+
+The SPEC's M-numbers are used everywhere (commits, tests, this file). They map to:
+
+| | Module | Role |
+|---|---|---|
+| — | `services/recorder/` | ffmpeg segmenter: webcam → `data/archive/`, 60 s segments (§2.1) |
+| M1 | `services/ingest/` | motion gate + live captioner + telemetry (§2) |
+| M2 | `services/index/` | chunk index; **in-process library, no `__main__`** (§3) |
+| M3 | `services/agent/` | ask agent + stdlib `http.server` / hand-rolled RFC 6455 WebSocket server + UI on :8080 (§4) |
+| M4 | `services/worker/` | deep worker: re-watches footage, cuts evidence clips (§5) |
+| M5 | `services/monitor/` | standing-task funnel → MCP actions (§6) |
+| — | `services/mcp/` | action server + the three brakes; **in-process library, no `__main__`** (§6.4) |
+| — | `shared/` | `schema.py`, `timecode.py`, `vlm_client.py`, `queue.py` — the only cross-service code |
+
+`services/index` and `services/mcp` are deliberately libraries, not daemons: running
+the action server as a second process would mean a second writer on the append-only
+`data/actions.jsonl`.
+
+There are no third-party runtime deps beyond PyYAML + requests (fastapi/numpy etc.
+were never approved — see pyproject.toml). Everything else is stdlib on purpose.
+
+**Backends are swappable in `config/settings.yaml`.** The live config points
+`vlm`/`agent` at the local `llama-server`, with `index` on `memory` + `hashing` +
+`lexical`. Every backend has a stub/in-memory sibling that needs no model —
+`vlm.backend: stub` runs the whole pipeline model-free, which is how it was proven.
+While the memory store is in use, **`index.store.memory_path` must stay set**: M1, M3
+and M5 are separate processes, and with it null each gets its own empty corpus —
+captions die with the ingest process and every question retrieves nothing.
 
 ---
 
@@ -199,12 +230,38 @@ ingest — see invariant 1.
 
 ## Commands
 
+Everything runs on the host. The docker path (`make up`, `docker-compose.yml`,
+`deploy/`) is written but has **never been run** and is not needed — see README
+"Setup blockers" before touching it.
+
 ```bash
-make up            # docker compose: milvus, vllm, nim, services
-make ingest        # run M1 against the configured source
-make bench         # time a single caption — the number that governs everything
-make test
-make lint
+./scripts/start.sh               # everything, in dependency order: model → recorder → ingest → agent
+./scripts/start.sh --no-record   # skip the camera, use existing data/archive
+./scripts/stop.sh                # SIGTERM shutdown (never kill -9 — corrupts the open segment)
+```
+
+UI at http://127.0.0.1:8080/ (`?mode=mock` rehearses against `ui/mock/` fixtures);
+index browser at /browse.html. Logs in `.run/logs/{model,recorder,ingest,agent}.log`.
+
+By hand / individual pieces:
+
+```bash
+make serve                          # the one model process — must be running first
+python3 -m services.recorder        # webcam → data/archive
+python3 -m services.ingest --follow # M1 (or: make ingest, one-shot)
+python3 -m services.agent           # M3 + UI on :8080
+make bench                          # time a single caption — the number that governs everything
+make doctor                         # check this box against the machine-state table below
+make test                           # full suite
+make lint                           # ruff check
+make fmt                            # ruff format
+```
+
+Tests are stdlib `unittest` — no pytest, no third-party packages. One file / one test:
+
+```bash
+python3 -m unittest tests.test_timecode -v
+python3 -m unittest tests.test_timecode.TestClass.test_name
 ```
 
 ---
