@@ -1,0 +1,60 @@
+{
+  "_note": [
+    "A SUBSET of config/settings.yaml, same nesting, same key paths. The UI reads tunables",
+    "from here so no number is hard-coded in the JS (CLAUDE.md: no magic numbers).",
+    "",
+    "This file is the fallback only. ui/serve.py serves the REAL config/settings.yaml at",
+    "GET /api/config, and the M3 FastAPI process should serve the same path; the client",
+    "tries that first and drops back to this file when the endpoint is absent (e.g. a",
+    "plain static preview). Keep the two in sync - tests/test_ui.py asserts the values",
+    "below still match config/settings.yaml.",
+    "",
+    "config/settings.yaml is owned by another module; nothing here edits it."
+  ],
+  "camera": {
+    "id": "cam01"
+  },
+  "recorder": {
+    "segment_seconds": 60
+  },
+  "ingest": {
+    "window_seconds": 5,
+    "stride_seconds": 4,
+    "sample_fps": 1,
+    "live_short_side_px": 512,
+    "overlay": {
+      "format": "%Y-%m-%d %H:%M:%S UTC"
+    }
+  },
+  "vlm": {
+    "profiles": {
+      "deep": {
+        "max_tokens": 600,
+        "sample_fps": 4,
+        "native_resolution": true
+      }
+    }
+  },
+  "index": {
+    "search": {
+      "ann_k": 20,
+      "rerank_top_n": 5
+    }
+  },
+  "agent": {
+    "deep": {
+      "timeout_seconds": 90
+    }
+  },
+  "monitor": {
+    "stage1_cosine_threshold": 0.35,
+    "stage2_sustain_default": 120,
+    "default_cooldown_seconds": 300
+  },
+  "ui": {
+    "display_timezone": "Asia/Kolkata",
+    "time_format": "%H:%M:%S",
+    "poll_interval_ms": 1000,
+    "vendored_assets_only": true
+  }
+}

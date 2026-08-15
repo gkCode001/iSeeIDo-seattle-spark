@@ -1,0 +1,96 @@
+{
+  "_note": [
+    "Fixture: ActionLogEntry.to_dict() rows (shared/schema.py, SPEC 6.4), newest last.",
+    "This is the SAME shape data/actions.jsonl holds and the same rows M3 reads through",
+    "read_action_log (SPEC 11.4: one source, no drift).",
+    "",
+    "Rows are NEVER mutated. Verification and retraction append a new row carrying",
+    "parent_id. The Timeline pane folds children under their parent for display only.",
+    "",
+    "Times are UTC; they render as 21:11 / 21:34 / 21:40 in Asia/Kolkata, matching the",
+    "SPEC 11.4 mockup.",
+    "",
+    "act-0003 -> act-0004 is the retraction the demo needs on screen: a raise_alert that",
+    "the deep worker disagreed with. Its footage range spans two segment files."
+  ],
+  "entries": [
+    {
+      "entry_id": "act-0001",
+      "ts": "2026-08-14T15:41:14Z",
+      "action": "raise_alert",
+      "t_start": "2026-08-14T15:41:07Z",
+      "t_end": "2026-08-14T15:41:52Z",
+      "status": "unverified",
+      "task_id": "fire-door-blocked",
+      "reason": "stage-2 confirm sustained 120s: vehicle stopped in front of the fire door",
+      "clip_path": null,
+      "parent_id": null,
+      "job_id": "b2c9"
+    },
+    {
+      "entry_id": "act-0002",
+      "ts": "2026-08-14T15:41:52Z",
+      "action": "raise_alert",
+      "t_start": "2026-08-14T15:41:07Z",
+      "t_end": "2026-08-14T15:41:52Z",
+      "status": "verified",
+      "task_id": "fire-door-blocked",
+      "reason": "worker at native res, 4 fps: white panel van stationary across the fire door for 45s",
+      "clip_path": "data/clips/cam01_20260814T154107_154152.mp4",
+      "parent_id": "act-0001",
+      "job_id": "b2c9"
+    },
+    {
+      "entry_id": "act-0003",
+      "ts": "2026-08-14T16:04:02Z",
+      "action": "raise_alert",
+      "t_start": "2026-08-14T16:03:55Z",
+      "t_end": "2026-08-14T16:04:10Z",
+      "status": "unverified",
+      "task_id": "fire-door-blocked",
+      "reason": "stage-2 confirm: dark shape halted in front of the fire door",
+      "clip_path": null,
+      "parent_id": null,
+      "job_id": "d41e"
+    },
+    {
+      "entry_id": "act-0004",
+      "ts": "2026-08-14T16:04:39Z",
+      "action": "raise_alert",
+      "t_start": "2026-08-14T16:03:55Z",
+      "t_end": "2026-08-14T16:04:10Z",
+      "status": "retracted",
+      "task_id": "fire-door-blocked",
+      "reason": "worker found no vehicle - headlight glare on the roller door, misread by the 1 fps caption",
+      "clip_path": "data/clips/cam01_20260814T160355_160410.mp4",
+      "parent_id": "act-0003",
+      "job_id": "d41e"
+    },
+    {
+      "entry_id": "act-0005",
+      "ts": "2026-08-14T16:10:11Z",
+      "action": "save_clip",
+      "t_start": "2026-08-14T16:10:06Z",
+      "t_end": "2026-08-14T16:10:36Z",
+      "status": "unverified",
+      "task_id": "loading-bay-activity",
+      "reason": "stage-2 confirm; save_clip is low stakes and fires without verification (SPEC 6.3)",
+      "clip_path": "data/clips/cam01_20260814T161006_161036.mp4",
+      "parent_id": null,
+      "job_id": null
+    },
+    {
+      "entry_id": "act-0006",
+      "ts": "2026-08-14T15:42:30Z",
+      "action": "save_clip",
+      "t_start": "2026-08-14T15:41:07Z",
+      "t_end": "2026-08-14T15:41:52Z",
+      "status": "unverified",
+      "task_id": null,
+      "reason": "saved from chat after deep job 7f3a resolved the rear-door question",
+      "clip_path": "data/clips/cam01_20260814T154107_154152_ask.mp4",
+      "parent_id": null,
+      "job_id": "7f3a"
+    }
+  ]
+}

@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Index browser — cam01</title>
+
+    <!--
+      The index, one row per analysis window, in wall-clock order.
+
+      This page answers "where does the answer come from?". The console (index.html)
+      shows the two or three chunks an answer cited; this shows the corpus those chunks
+      were drawn from — including the ~78% of windows the detector gate skipped, which
+      are rows here with no caption. A reader who cannot see the skipped windows is
+      looking at an index four times smaller than the one the system holds.
+
+      Same invariant 10 rule as the console: NO REMOTE ASSETS. Everything below is a
+      relative path into ui/, the favicon is an inline base64 PNG, fonts are the system
+      stack. `grep -rn "https\?://" ui/*.html ui/static ui/mock` must stay empty.
+    -->
+    <link rel="icon" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAJUlEQVR42mPgFRQnCTEMTw0RFxfAEWENyKqx6hkCGkj29IhIGgB2kmeBWMMSfgAAAABJRU5ErkJggg==" />
+    <link rel="stylesheet" href="static/app.css" />
+  </head>
+
+  <body class="page--browse">
+    <header class="topbar">
+      <div class="topbar-left">
+        <a class="brand brand--link" href="index.html">TWO-SPEED VISION</a>
+        <span class="brand-sub" data-camera-id>cam01</span>
+        <span class="brand-sub brand-sub--here">index</span>
+      </div>
+      <div class="topbar-right">
+        <a class="pill pill--quiet" href="index.html" title="back to the ask / watch console">← console</a>
+        <span class="pill" data-mode-pill>…</span>
+        <span class="pill pill--quiet" data-tz-pill>…</span>
+        <span class="pill pill--quiet" data-clock-pill>--:--:--</span>
+      </div>
+    </header>
+
+    <div class="banner" data-banner hidden></div>
+
+    <main class="browse">
+      <header class="browse-head">
+        <div>
+          <h1>Index</h1>
+          <p class="muted browse-sub">
+            Every analysis window the system wrote down, newest first. This is the text an
+            Ask answer is retrieved from — one row per window, each carrying the absolute
+            wall-clock range, its segment file and its offset into it (invariant 2).
+          </p>
+        </div>
+
+        <!-- Corpus health, from the same counts SPEC §2.3 tracks. The skip rate is here
+             rather than in a log because a browser of the index is exactly where "why is
+             this corpus this size?" gets asked. -->
+        <div class="corpus" data-corpus>
+          <div class="corpus-cell">
+            <span class="corpus-num" data-corpus-total>–</span>
+            <span class="corpus-label">windows</span>
+          </div>
+          <div class="corpus-cell">
+            <span class="corpus-num" data-corpus-captioned>–</span>
+            <span class="corpus-label">captioned</span>
+          </div>
+          <div class="corpus-cell">
+            <span class="corpus-num" data-corpus-gated>–</span>
+            <span class="corpus-label">gate-skipped</span>
+          </div>
+          <div class="corpus-cell">
+            <span class="corpus-num" data-corpus-skiprate>–</span>
+            <span class="corpus-label" data-corpus-health>skip rate</span>
+          </div>
+        </div>
+      </header>
+
+      <!-- ─────────────────────────────── filters ─────────────────────────────── -->
+      <form class="filters" data-filters>
+        <label class="filters-search">
+          <span class="filters-label">search captions</span>
+          <input
+            type="search"
+            name="q"
+            data-filter-q
+            placeholder="substring, e.g. orange shirt — plain text, not a semantic query"
+            autocomplete="off"
+          />
+        </label>
+
+        <label>
+          <span class="filters-label">rows</span>
+          <select name="gated" data-filter-gated>
+            <option value="">all windows</option>
+            <option value="false">captioned only</option>
+            <option value="true">gate-skipped only</option>
+          </select>
+        </label>
+
+        <label>
+          <span class="filters-label">tier</span>
+          <select name="tier" data-filter-tier>
+            <option value="">all tiers</option>
+            <option value="live">live</option>
+            <option value="rollup">rollup</option>
+          </select>
+        </label>
+
+        <label>
+          <span class="filters-label">range</span>
+          <select name="range" data-filter-range>
+            <option value="">all time</option>
+            <option value="900">last 15 min</option>
+            <option value="3600">last hour</option>
+            <option value="21600">last 6 h</option>
+            <option value="86400">last 24 h</option>
+          </select>
+        </label>
+
+        <label>
+          <span class="filters-label">order</span>
+          <select name="order" data-filter-order>
+            <option value="newest">newest first</option>
+            <option value="oldest">oldest first</option>
+          </select>
+        </label>
+
+        <label>
+          <span class="filters-label">per page</span>
+          <select name="limit" data-filter-limit></select>
+        </label>
+
+        <div class="filters-actions">
+          <button type="submit" class="btn btn--primary">apply</button>
+          <button type="button" class="btn btn--quiet" data-filter-reset>reset</button>
+        </div>
+      </form>
+
+      <!-- ──────────────────────────────── rows ───────────────────────────────── -->
+      <section class="rows card" data-rows-card>
+        <div class="rows-head">
+          <span class="card-title">Windows</span>
+          <span class="card-badge" data-rows-summary>loading…</span>
+        </div>
+
+        <div class="rows-scroll" data-rows-scroll>
+          <table class="rows-table">
+            <thead>
+              <tr>
+                <th scope="col" class="col-time">time</th>
+                <th scope="col" class="col-state">state</th>
+                <th scope="col" class="col-caption">caption</th>
+                <th scope="col" class="col-source">source</th>
+              </tr>
+            </thead>
+            <tbody data-rows-body></tbody>
+          </table>
+          <p class="rows-empty muted" data-rows-empty hidden></p>
+        </div>
+
+        <!-- ───────────────────────────── pagination ──────────────────────────── -->
+        <nav class="pager" data-pager aria-label="index pages">
+          <button type="button" class="btn btn--quiet" data-page-first title="first page">⏮ first</button>
+          <button type="button" class="btn" data-page-prev title="previous page (←)">‹ prev</button>
+          <span class="pager-state" data-pager-state>–</span>
+          <button type="button" class="btn" data-page-next title="next page (→)">next ›</button>
+          <button type="button" class="btn btn--quiet" data-page-last title="last page">last ⏭</button>
+        </nav>
+      </section>
+
+      <p class="muted browse-foot">
+        Times render in the operator's timezone; hover any of them for the Z-suffixed UTC
+        value actually stored (SPEC §11.5). <strong>▶ range</strong> asks the server for
+        footage by <em>time range</em>, never by filename — an event can span two segment
+        files (invariant 3). Rows with no caption are windows the detector gate skipped
+        before inference: not a failure, and the reason the live path keeps up.
+      </p>
+    </main>
+
+    <script src="static/time.js" defer></script>
+    <script src="static/data.js" defer></script>
+    <script src="static/browse.js" defer></script>
+  </body>
+</html>

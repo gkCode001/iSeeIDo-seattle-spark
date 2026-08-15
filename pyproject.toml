@@ -1,0 +1,36 @@
+[project]
+name = "spark-vision"
+version = "0.1.0"
+description = "Two-speed vision agent on a single DGX Spark"
+requires-python = ">=3.11"
+
+# CLAUDE.md: do not add dependencies without asking. Dependency availability is the
+# most common way this box eats an afternoon, and ARM64 + sm_121 wheels are frequently
+# missing. Everything below is DECLARED, not installed. Verify an aarch64 build exists
+# before approving any addition.
+#
+# Present in system python already: PyYAML 6.0.1, requests 2.31.0
+dependencies = [
+  "pyyaml>=6.0",
+  "requests>=2.31",
+]
+
+[project.optional-dependencies]
+# Pending approval — needed before the corresponding module can run.
+serve = ["fastapi", "uvicorn[standard]", "websockets"]   # M3 + UI (SPEC §4.3, §11.1)
+index = ["pymilvus", "numpy"]                            # M2 (SPEC §3.2)
+dev = ["pytest", "ruff"]
+
+# Tests are written as stdlib `unittest` so they run with no third-party packages:
+#   python3 -m unittest discover -s tests -v
+# pytest is a convenience, never a requirement.
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["shared", "services"]

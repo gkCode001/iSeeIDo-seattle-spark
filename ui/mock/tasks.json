@@ -1,0 +1,34 @@
+{
+  "_note": [
+    "Fixture: Task.to_dict() rows (shared/schema.py, SPEC 6.1). Mirrors config/tasks.yaml,",
+    "which stays the cold-start seed (SPEC 11.3).",
+    "",
+    "`active` is a LOCAL wall-clock window and may wrap midnight - the one deliberate",
+    "exception to UTC-everywhere (see the Task docstring). The UI renders it verbatim and",
+    "never converts it.",
+    "",
+    "embedding is empty here for the same reason as chunks.json: the UI never reads it."
+  ],
+  "tasks": [
+    {
+      "task_id": "fire-door-blocked",
+      "describe": "a vehicle stopped in front of the fire door",
+      "window": 120,
+      "action": "raise_alert",
+      "cooldown": 300,
+      "active": "18:00-06:00",
+      "enabled": true,
+      "embedding": []
+    },
+    {
+      "task_id": "loading-bay-activity",
+      "describe": "a person unloading boxes from a vehicle at the loading bay",
+      "window": 30,
+      "action": "save_clip",
+      "cooldown": 120,
+      "active": "00:00-24:00",
+      "enabled": true,
+      "embedding": []
+    }
+  ]
+}

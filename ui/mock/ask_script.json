@@ -1,0 +1,95 @@
+{
+  "_note": [
+    "The rehearsal script for the Ask pane. MOCK MODE ONLY - it stands in for POST /api/ask",
+    "plus the SPEC 4.3 WebSocket, with the real clock, so the escalation arc can be",
+    "rehearsed exactly as it will play on stage:",
+    "",
+    "    t=0.0s   question submitted",
+    "    t=2.1s   provisional answer + groundedness verdict + job_id  (turn ENDS here)",
+    "    t=2.1s   elapsed timer starts counting against agent.deep.timeout_seconds",
+    "    t=34.8s  refined answer APPENDED below the provisional, never over it",
+    "",
+    "Timings are wall-clock milliseconds and are real by default; the header's speed",
+    "control divides them for iteration, and must be back at 1x for the rehearsal.",
+    "",
+    "`turn` fields are ChatTurn fields; `job` fields are DeepJob fields (shared/schema.py).",
+    "turn_id / ts / requested_at / completed_at are filled at submit time.",
+    "",
+    "SPEC 10 D6 wants one question the index answers and one it cannot, on the same",
+    "footage. Both are here. `default_script` is the escalation one on purpose: any",
+    "off-script question a judge types still lands on the moment the demo exists to show."
+  ],
+  "default_script": "escalation",
+  "scripts": [
+    {
+      "id": "grounded",
+      "match": ["when did", "arrive", "what time", "how long", "was there a van"],
+      "provisional_ms": 1400,
+      "turn": {
+        "question": "When did the van arrive at the loading door?",
+        "provisional_answer": "A white panel van reverses toward the loading door starting at 21:11:07 and is stopped across the fire door bay by 21:11:11. It has not moved again through 21:11:52.",
+        "grounded": true,
+        "cited_chunk_ids": [
+          "cam01_20260814T154107_154112",
+          "cam01_20260814T154111_154116",
+          "cam01_20260814T154147_154152"
+        ],
+        "latency_s": 1.4,
+        "job_id": null
+      },
+      "job": null
+    },
+    {
+      "id": "escalation",
+      "match": ["rear door", "rear doors", "back door", "open", "logo", "plate", "colour", "color", "read"],
+      "provisional_ms": 2100,
+      "refined_ms": 34800,
+      "turn": {
+        "question": "Was the van's rear door open when it backed up?",
+        "provisional_answer": "A white panel van reversed toward the loading door around 21:11. The caption doesn't record whether its rear door was open.",
+        "grounded": false,
+        "cited_chunk_ids": [
+          "cam01_20260814T154107_154112",
+          "cam01_20260814T154119_154124",
+          "cam01_20260814T154139_154144",
+          "cam01_20260814T154147_154152"
+        ],
+        "latency_s": 2.1,
+        "job_id": "7f3a"
+      },
+      "job": {
+        "job_id": "7f3a",
+        "t_start": "2026-08-14T15:41:07Z",
+        "t_end": "2026-08-14T15:41:52Z",
+        "question": "Was the van's rear door open when it backed up?",
+        "state": "done",
+        "answer": "Yes. The rear doors are open from 21:11:19 onward - visible as the van turns. Two figures approach from the right at 21:11:41.",
+        "reasoning": "Re-decoded 45 s at native resolution, 4 fps (181 frames). Frames up to 21:11:18 show the van at an angle with the rear face occluded by the door pillar, which is why the 1 fps live caption could not commit either way. At 21:11:19 the van yaws roughly 15 degrees and both rear doors are visible, swung outward past the body line; the left door edge casts a shadow onto the loading apron that tracks with the door, not the body, confirming it is open rather than a reflection. The doors remain open in every subsequent frame. At 21:11:41 two figures enter from the right edge and reach the rear of the van by 21:11:47. No cargo movement is visible within the analysed range.",
+        "confidence": 0.88,
+        "evidence_clip": "data/clips/cam01_20260814T154107_154152_ask.mp4",
+        "error": null,
+        "cited_chunk_ids": [
+          "cam01_20260814T154119_154124",
+          "cam01_20260814T154139_154144"
+        ]
+      }
+    },
+    {
+      "id": "why-did-you-alert",
+      "match": ["why did you alert", "why did it alert", "action log", "retract"],
+      "provisional_ms": 900,
+      "turn": {
+        "question": "Why did you alert at 21:11?",
+        "provisional_answer": "read_action_log(21:00-22:00) returns act-0001: raise_alert on fire-door-blocked at 21:11:14, fired on stage-2 confidence after a 120 s sustain. act-0002 amended it to verified at 21:11:52 with a clip attached. The later alert at 21:34:02 was retracted - the worker found headlight glare, not a vehicle.",
+        "grounded": true,
+        "cited_chunk_ids": [
+          "cam01_20260814T154111_154116",
+          "cam01_20260814T154147_154152"
+        ],
+        "latency_s": 0.9,
+        "job_id": null
+      },
+      "job": null
+    }
+  ]
+}

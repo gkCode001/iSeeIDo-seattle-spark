@@ -1,0 +1,558 @@
+# =======================================================================================
+# Two-Speed Vision Agent — container topology (SPEC §1, §7.1, §12)
+#
+# NOTHING IN THIS FILE HAS BEEN RUN. As of 2026-08-15 this box cannot start a container
+# at all: the user is not in the `docker` group and /etc/docker/daemon.json is absent, so
+# the nvidia runtime is unregistered. And nvcr.io returns 401 with no NGC key, so not one
+# NVIDIA image below has been pulled, let alone verified for ARM64 + sm_121.
+# `make doctor` prints the exact fix for each of those. Read README.md "Setup blockers"
+# before assuming any of this works.
+#
+# Every image tag is an env var. That is deliberate: an unverified tag hard-coded here
+# would read like a decision that has been made. `deploy/.env.example` lists the
+# candidates, each labelled with what still needs confirming.
+#
+# ---------------------------------------------------------------------------------------
+# WHY APP SERVICES USE HOST NETWORKING
+#
+# config/settings.yaml (not ours to edit) hard-codes `localhost` for every endpoint:
+# vLLM :8000, embed :8001, rerank :8002, agent LLM :8003, Milvus :19530, agent server
+# :8080. Inside a bridge network `localhost` is the container itself and every one of
+# those would fail. So: model/infra containers publish to 127.0.0.1 on the host, and app
+# containers run with `network_mode: host` — `localhost:8000` then resolves to the vLLM
+# publish. One camera, one box; there is no multi-host story to protect.
+# The alternative is a forked settings file via SPARK_SETTINGS (shared/config.py honours
+# it), which buys nothing and adds a second copy of every tunable that can drift.
+#
+# ---------------------------------------------------------------------------------------
+# PROFILES — what `make up` actually starts
+#
+#   make up                                        recorder, ingest, agent, worker, monitor
+#                                                  Today's config is all stubs (vlm.backend
+#                                                  stub, index memory, embed hashing,
+#                                                  rerank lexical, agent stub), so this set
+#                                                  needs neither Milvus nor NGC.
+#   docker compose --profile index up -d           + etcd, minio, milvus   (flip index.store.backend: milvus)
+#   docker compose --profile models up -d          + vllm, embed, rerank, llm   (needs NGC; flip vlm.backend: vllm etc.)
+#   docker compose --profile index --profile models up -d      the full SPEC §1 stack
+#   docker compose --profile standalone up -d      index/mcp as their own processes — see note on those services
+#
+# Deliberately NO depends_on from an app service to a profiled model service. Compose's
+# behaviour when a started service depends on a profile-disabled one has changed across
+# versions; relying on it would mean `make up` sometimes drags in a 52 GB vLLM that
+# today's stub config does not want. depends_on + healthchecks are used wherever the
+# ordering is unambiguous (etcd/minio -> milvus, and within the models profile).
+# =======================================================================================
+
+name: spark-vision
+
+# ---------------------------------------------------------------------------------------
+# Anchors
+# ---------------------------------------------------------------------------------------
+
+# GPU access. REQUIRES the nvidia runtime to be registered with dockerd first:
+#     sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker
+# Without that, `runtime: nvidia` fails with "unknown or invalid runtime name" — which is
+# the loud failure we want, not a silent CPU fallback.
+x-gpu: &gpu
+  runtime: nvidia
+
+# `video` is not decoration: ffmpeg's h264_nvenc / *_cuvid dlopen libnvidia-encode.so.1
+# and libnvcuvid.so.1, which the container runtime only injects when this capability is
+# listed. Without it the recorder's encoder and the ingest path's NVDEC both vanish and
+# ffmpeg falls back to software, silently.
+x-gpu-env: &gpu-env
+  NVIDIA_VISIBLE_DEVICES: all
+  NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
+
+# Everything an app service needs to behave like `python3 -m services.X` run from the
+# repo root. Source is bind-mounted rather than baked in: a hackathon edit should not
+# cost an image rebuild.
+x-app: &app
+  build:
+    context: .
+    dockerfile: deploy/Dockerfile.app
+  image: ${APP_IMAGE:-spark-vision/app:dev}
+  # See "WHY APP SERVICES USE HOST NETWORKING" above.
+  network_mode: host
+  init: true
+  working_dir: /app
+  volumes:
+    - ./shared:/app/shared:ro
+    - ./services:/app/services:ro
+    - ./scripts:/app/scripts:ro
+    # settings.yaml is owned elsewhere and read, never written. Mounted ro so a container
+    # cannot be the thing that quietly edits it.
+    - ./config:/app/config:ro
+    # THE ARCHIVE. A bind mount, never a named volume: 43 GB/day budgeted (~22 GB/day
+    # measured at the real webcam bitrate, CLAUDE.md), and `docker compose down -v` must
+    # not be able to delete the footage the deep worker exists to re-read.
+    - ./data:/app/data
+  restart: unless-stopped
+
+x-app-env: &app-env
+  PYTHONPATH: /app
+  PYTHONUNBUFFERED: "1"
+  # shared/config.py reads SPARK_SETTINGS if set; left unset it uses config/settings.yaml.
+  TZ: UTC
+
+# ---------------------------------------------------------------------------------------
+# MEMORY — SPEC §7.1, and the reason this file has limits on every service.
+#
+#   | Component      | GB |          allocated to
+#   |----------------|----|--------------------------------------------------
+#   | VLM weights    | 18 |  vllm  ┐ 52g combined
+#   | VLM KV-cache   | 34 |  vllm  ┘
+#   | LLM weights    | 19 |  llm   ┐ 27g combined
+#   | LLM KV         |  8 |  llm   ┘
+#   | Embed + rerank |  3 |  embed 2g + rerank 1g      (the 2/1 split is ours, not SPEC's)
+#   | Milvus         |  6 |  milvus 5g + etcd 512m + minio 512m   (split is ours)
+#   | DeepStream     |  5 |  RESERVED, not allocated — see the note at the bottom
+#   | OS + headroom  | 35 |  app services take 17g of it; 18g left for OS + page cache
+#                     128
+#
+# 128 GB is unified. There is no VRAM to spill into: a second model instance does not run
+# slowly, it OOMs the box (CLAUDE.md invariant 1). Hence one vllm and one llm, both hard
+# capped, and no `scale:` anywhere in this file.
+#
+# HONEST CAVEAT: `mem_limit` is a cgroup limit on host page allocations. Whether every
+# CUDA allocation on a GB10's unified memory is charged to the container's cgroup has NOT
+# been verified here — nothing has been run. So mem_limit is the backstop; the load-
+# bearing cap is the application-level flag (--gpu-memory-utilization for vLLM), which is
+# why both are set on every model service.
+# ---------------------------------------------------------------------------------------
+
+services:
+
+  # =====================================================================================
+  # Milvus and its dependencies — SPEC §3.2. Profile: index
+  # SPEC §7.1 row "Milvus | 6", split 5g / 512m / 512m across the three.
+  # =====================================================================================
+
+  etcd:
+    profiles: ["index"]
+    # Multi-arch including linux/arm64 — high confidence, but UNPULLED here. Verify.
+    image: ${ETCD_IMAGE:-quay.io/coreos/etcd:v3.5.16}
+    command:
+      - etcd
+      - --advertise-client-urls=http://etcd:2379
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --data-dir=/etcd
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      ETCD_SNAPSHOT_COUNT: "50000"
+    volumes:
+      # Infra state lives under deploy/volumes, kept clear of data/ which is the archive.
+      - ./deploy/volumes/etcd:/etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+      start_period: 30s
+    mem_limit: 512m          # SPEC §7.1 "Milvus | 6" (our split)
+    memswap_limit: 512m      # equal to mem_limit => no swap escape hatch
+    restart: unless-stopped
+
+  minio:
+    profiles: ["index"]
+    # Multi-arch including linux/arm64 — high confidence, but UNPULLED here. Verify.
+    image: ${MINIO_IMAGE:-minio/minio:RELEASE.2024-05-28T17-19-04Z}
+    command: minio server /minio_data --console-address ":9001"
+    environment:
+      # Local-only development defaults, not secrets: MinIO is not published to the host
+      # at all (no `ports:` below), so it is reachable only from the compose network.
+      # Override in deploy/.env if you disagree.
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    volumes:
+      - ./deploy/volumes/minio:/minio_data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+      start_period: 30s
+    mem_limit: 512m          # SPEC §7.1 "Milvus | 6" (our split)
+    memswap_limit: 512m
+    restart: unless-stopped
+
+  milvus:
+    profiles: ["index"]
+    # UNVERIFIED for linux/arm64. Milvus publishes arm64 images for some releases only;
+    # confirm this exact tag has an aarch64 manifest before committing:
+    #     docker manifest inspect $MILVUS_IMAGE | grep -i arm64
+    image: ${MILVUS_IMAGE:-milvusdb/milvus:v2.4.15}
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+      MINIO_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    volumes:
+      - ./deploy/volumes/milvus:/var/lib/milvus
+    ports:
+      # config/settings.yaml index.milvus: host localhost, port 19530. Bound to loopback
+      # only — nothing here should be reachable off the box.
+      - "127.0.0.1:19530:19530"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      timeout: 20s
+      retries: 5
+      start_period: 120s
+    depends_on:
+      etcd:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    mem_limit: 5g            # SPEC §7.1 "Milvus | 6" (our split: 5 + 0.5 + 0.5)
+    memswap_limit: 5g
+    restart: unless-stopped
+
+  # =====================================================================================
+  # The ONE VLM process — SPEC §7, CLAUDE.md invariant 1. Profile: models
+  # =====================================================================================
+
+  vllm:
+    profiles: ["models"]
+    <<: *gpu
+    # UNVERIFIED, and this is the riskiest line in the file. ARM64 + sm_121 vLLM images
+    # are not a solved problem: sm_121 is not sm_100 (datacenter Blackwell) and not
+    # sm_120 (RTX 50xx), and a wheel built for either will not load. There is no default
+    # here on purpose — pick one in deploy/.env and record what you verified.
+    image: ${VLLM_IMAGE:?set VLLM_IMAGE in deploy/.env — no ARM64 + sm_121 vLLM tag has been verified on this box}
+    # Assumes an image whose ENTRYPOINT is the OpenAI-compatible api_server (as
+    # vllm/vllm-openai is). If your image entrypoints somewhere else, add `entrypoint:`.
+    #
+    # String form, not a list, so that an empty VLLM_EXTRA_ARGS collapses to nothing —
+    # in list form it would pass a literal "" and vLLM would exit on an unrecognised
+    # argument.
+    #
+    # SPEC §10 D1 IS OPEN. vlm.model is null in settings.yaml by design and no variant is
+    # chosen here either — the block-0 caption benchmark decides it (SPEC §9), not this
+    # file. `:?` means an unset VLM_MODEL fails compose immediately with a message rather
+    # than booting some default and quietly answering the demo's questions wrong.
+    #
+    # --dtype bfloat16 matches vlm.precision: bf16. Quantized Cosmos Reason variants are
+    # documented to hallucinate (SPEC §2.4) — do not "save memory" there.
+    #
+    # ---- CAP 1 of 3: the allocator ceiling ------------------------------------------
+    # --gpu-memory-utilization 0.40: 52 GB of 128 = 0.406, rounded down. Covers SPEC §7.1
+    # rows "VLM weights | 18" and "VLM KV-cache | 34" together, because vLLM sizes the KV
+    # cache as (utilization x total) minus weights minus activations. Left at vLLM's 0.90
+    # default it takes ~115 GB and the ask LLM has nowhere to live — precisely what
+    # SPEC §7.1 warns about.
+    #
+    # ---- CAP 2 of 3: the explicit KV-cache cap --------------------------------------
+    # KV bytes = max_num_seqs x max_model_len x bytes_per_token, so these two flags cap
+    # the KV cache arithmetically instead of leaving it to whatever is left over.
+    # bytes_per_token = 2 (K and V) x layers x kv_heads x head_dim x 2 (bf16); fill in the
+    # model's numbers once D1 lands and check the product against the 34 GB row.
+    # queue.max_inflight is 1 (one camera = one request in flight), so 2 sequences is one
+    # live slot plus one slot of slack for a deep job arriving mid-caption.
+    #
+    # --swap-space 0: no VRAM to spill into, so vLLM's "CPU" swap is the same 128 GB and
+    # preemption swapping just moves bytes between pockets. 0 reclaims its 4 GiB default.
+    #
+    # ---- CAP 3 of 3 is `mem_limit` below (cgroup backstop). -------------------------
+    #
+    # VLLM_EXTRA_ARGS holds version-dependent flags so this file does not assert a syntax
+    # it has never run. Strong candidates, documented in deploy/.env.example:
+    #   --limit-mm-per-prompt    (5 frames/window, SPEC §2.2 — bounds multimodal KV)
+    #   --kv-cache-memory-bytes / --num-gpu-blocks-override   (a direct 34 GB KV cap)
+    command: >-
+      --model ${VLM_MODEL:?SPEC 10 D1 is unresolved - set VLM_MODEL in deploy/.env after the block-0 benchmark, and verify the variant has an sm_121 build}
+      --served-model-name ${VLM_SERVED_NAME:-cosmos-live}
+      --host 0.0.0.0
+      --port 8000
+      --dtype bfloat16
+      --gpu-memory-utilization ${VLLM_GPU_MEMORY_UTILIZATION:-0.40}
+      --max-num-seqs ${VLLM_MAX_NUM_SEQS:-2}
+      --max-model-len ${VLLM_MAX_MODEL_LEN:-16384}
+      --swap-space 0
+      ${VLLM_EXTRA_ARGS:-}
+    environment:
+      <<: *gpu-env
+      # SPEC §7.1 names this variable explicitly. The CLI flag above is authoritative for
+      # vLLM; this is set to the same value so the two can never disagree.
+      VLLM_GPU_MEMORY_UTILIZATION: ${VLLM_GPU_MEMORY_UTILIZATION:-0.40}
+      HF_HOME: /hf
+      # Referenced, never embedded. Export it in your shell or put it in deploy/.env,
+      # which is gitignored. Only needed for gated HuggingFace weights.
+      HF_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      # Weights are tens of GB. Bind-mounted so a `compose down -v` does not cost an hour
+      # of re-download during a 40-hour build.
+      - ${HF_CACHE_DIR:-./deploy/volumes/hf}:/hf
+    ports:
+      # config/settings.yaml vlm.endpoint: http://localhost:8000/v1
+      - "127.0.0.1:8000:8000"
+    # Single GPU, no tensor parallelism, so there is no large NCCL shm requirement.
+    # 2 GB comes out of the SPEC §7.1 "OS + headroom | 35" row. `ipc: host` is the usual
+    # vLLM recommendation but it would take shm off-budget, which on unified memory means
+    # off-budget from the same 128 GB.
+    shm_size: 2gb
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    healthcheck:
+      # Uses the image's own python rather than curl — vLLM images reliably have python,
+      # curl is not guaranteed. UNVERIFIED against a real image.
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      # Weight load on a cold page cache is minutes, not seconds. A short start_period
+      # here means compose kills the model while it is still loading.
+      start_period: 900s
+    mem_limit: 52g           # SPEC §7.1 "VLM weights | 18" + "VLM KV-cache | 34"
+    memswap_limit: 52g
+    restart: unless-stopped
+
+  # =====================================================================================
+  # NIM services — embed, rerank, ask LLM. Profile: models
+  #
+  # All three are nvcr.io images and nvcr.io returns 401 on this box. The repository
+  # paths below follow the published NIM naming convention and the model names in
+  # config/settings.yaml, but NOTHING HAS BEEN PULLED: neither the tag nor an aarch64
+  # manifest has been confirmed. Hence `:?` on every one — compose refuses to start
+  # rather than inventing a tag.
+  #
+  # NGC_API_KEY is read from the environment, never written into this file:
+  #     docker login nvcr.io -u '$oauthtoken' -p <API_KEY>
+  #     export NGC_API_KEY=<API_KEY>          # or put it in deploy/.env
+  # =====================================================================================
+
+  embed:
+    profiles: ["models"]
+    <<: *gpu
+    # config/settings.yaml index.embed.model: llama-3.2-nemoretriever-300m-embed-v1
+    image: ${EMBED_IMAGE:?set EMBED_IMAGE in deploy/.env — nvcr.io 401s here, so no embed NIM tag is confirmed for ARM64 + sm_121}
+    environment:
+      <<: *gpu-env
+      NGC_API_KEY: ${NGC_API_KEY:?docker login nvcr.io first, then export NGC_API_KEY (see README "Setup blockers")}
+      NIM_CACHE_PATH: /opt/nim/.cache
+      NIM_HTTP_API_PORT: "8001"
+    volumes:
+      - ${NIM_CACHE_DIR:-./deploy/volumes/nim}:/opt/nim/.cache
+    ports:
+      # config/settings.yaml index.embed.endpoint: http://localhost:8001/v1
+      - "127.0.0.1:8001:8001"
+    shm_size: 1gb
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/v1/health/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 600s
+    mem_limit: 2g            # SPEC §7.1 "Embed + rerank | 3" — 2/1 split is ours
+    memswap_limit: 2g
+    restart: unless-stopped
+
+  rerank:
+    profiles: ["models"]
+    <<: *gpu
+    # config/settings.yaml index.rerank.model: llama-3.2-nv-rerankqa-1b-v2
+    # Note index.rerank.path is /ranking — NIM rerank is NOT an OpenAI-shaped route.
+    image: ${RERANK_IMAGE:?set RERANK_IMAGE in deploy/.env — nvcr.io 401s here, so no rerank NIM tag is confirmed for ARM64 + sm_121}
+    environment:
+      <<: *gpu-env
+      NGC_API_KEY: ${NGC_API_KEY:?docker login nvcr.io first, then export NGC_API_KEY (see README "Setup blockers")}
+      NIM_CACHE_PATH: /opt/nim/.cache
+      NIM_HTTP_API_PORT: "8002"
+    volumes:
+      - ${NIM_CACHE_DIR:-./deploy/volumes/nim}:/opt/nim/.cache
+    ports:
+      # config/settings.yaml index.rerank.endpoint: http://localhost:8002/v1
+      - "127.0.0.1:8002:8002"
+    shm_size: 1gb
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/v1/health/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 600s
+    mem_limit: 1g            # SPEC §7.1 "Embed + rerank | 3" — 2/1 split is ours
+    memswap_limit: 1g
+    restart: unless-stopped
+
+  llm:
+    profiles: ["models"]
+    <<: *gpu
+    # The ask agent's LLM (M3). SPEC §10 D3 IS OPEN — Nemotron 3 Nano vs 3.5 Lightning is
+    # undecided and agent.model is null in settings.yaml by design. Both the image and
+    # the served model name are required env vars so this cannot silently pick one.
+    image: ${LLM_IMAGE:?SPEC §10 D3 is unresolved — set LLM_IMAGE in deploy/.env once a Nemotron variant is chosen AND confirmed to have an ARM64 + sm_121 container}
+    environment:
+      <<: *gpu-env
+      NGC_API_KEY: ${NGC_API_KEY:?docker login nvcr.io first, then export NGC_API_KEY (see README "Setup blockers")}
+      NIM_CACHE_PATH: /opt/nim/.cache
+      NIM_HTTP_API_PORT: "8003"
+      NIM_SERVED_MODEL_NAME: ${LLM_SERVED_NAME:?SPEC §10 D3 is unresolved — set LLM_SERVED_NAME in deploy/.env to match agent.model in config/settings.yaml}
+      # Per-NIM memory knobs (NIM_MAX_MODEL_LEN, NIM_KVCACHE_PERCENT and friends) vary by
+      # NIM and are NOT set here — their names could not be checked against a real image
+      # on this box. Read the chosen NIM's docs and add them once it pulls; mem_limit
+      # below is the backstop until then, and per the caveat at the top of this file a
+      # cgroup limit may not catch every unified-memory allocation.
+    volumes:
+      - ${NIM_CACHE_DIR:-./deploy/volumes/nim}:/opt/nim/.cache
+    ports:
+      # config/settings.yaml agent.endpoint: http://localhost:8003/v1
+      - "127.0.0.1:8003:8003"
+    shm_size: 2gb
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8003/v1/health/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 900s
+    mem_limit: 27g           # SPEC §7.1 "LLM weights | 19" + "LLM KV | 8"
+    memswap_limit: 27g
+    restart: unless-stopped
+
+  # =====================================================================================
+  # App services — SPEC §12. All limits below come out of SPEC §7.1 "OS + headroom | 35":
+  #   recorder 2 + ingest 6 + agent 2 + worker 2 + monitor 2 = 14g default-on,
+  #   + index 2 + mcp 1 = 17g if the standalone profile is used as well.
+  #   That leaves >=18g of the row for the OS and page cache.
+  # =====================================================================================
+
+  recorder:
+    # Two anchors in one merge sequence — YAML allows only one `<<` key per mapping, so
+    # `<<: *app` followed by `<<: *gpu` would silently drop one of them.
+    <<: [*app, *gpu]
+    command: ["python3", "-m", "services.recorder"]
+    environment:
+      <<: [*app-env, *gpu-env]
+    devices:
+      # SPEC §10 D2 RESOLVED: USB webcam. /dev/video0 is the capture node — /dev/video1
+      # on this camera exposes no formats (metadata only) and passing it does nothing.
+      # config/settings.yaml recorder.source is /dev/video0, so the path must match
+      # inside the container too.
+      # Camera access here is by ACL for uid 1000 on the host; the container runs as root
+      # and so opens the node via DAC override. If you change the app image to a non-root
+      # user this needs group_add or an explicit ACL. UNTESTED — no container has run.
+      - /dev/video0:/dev/video0
+    # THE MOST IMPORTANT LINE IN THIS SERVICE. Verified on the host (CLAUDE.md): SIGTERM
+    # lets ffmpeg write the mp4 moov atom so the final partial segment stays playable; a
+    # SIGKILL leaves it corrupt ("moov atom not found") and the last minute of footage is
+    # gone — at hour 39 that is the minute that matters. Docker's default grace period is
+    # 10s, which is exactly recorder.stop_timeout_seconds and leaves no margin for the
+    # supervisor's own SIGTERM-then-SIGKILL ladder. 30s gives it room.
+    stop_grace_period: 30s
+    stop_signal: SIGTERM
+    mem_limit: 2g            # SPEC §7.1 "OS + headroom | 35"
+    memswap_limit: 2g
+
+  ingest:
+    <<: [*app, *gpu]
+    # M1. Being built now by another agent — services/ingest/ is an empty package as of
+    # 2026-08-15, so this container will exit until its __main__ lands. The Makefile
+    # already agrees on the entrypoint (`make ingest` runs the same module).
+    command: ["python3", "-m", "services.ingest"]
+    environment:
+      <<: [*app-env, *gpu-env]
+    # Largest of the app services: it decodes on NVDEC and holds sampled frames
+    # (5 frames/window at 512px short side, SPEC §2.2) plus the gate's thumbnails.
+    mem_limit: 6g            # SPEC §7.1 "OS + headroom | 35"
+    memswap_limit: 6g
+    stop_grace_period: 20s
+
+  agent:
+    <<: *app
+    # M3, the ask surface. config/settings.yaml agent.host 0.0.0.0, agent.port 8080.
+    # With network_mode: host that binds the host's :8080 directly — no `ports:` needed,
+    # and none possible. This is the one service that is meant to be reachable from a
+    # browser on the demo laptop.
+    command: ["python3", "-m", "services.agent"]
+    environment:
+      <<: *app-env
+    mem_limit: 2g            # SPEC §7.1 "OS + headroom | 35"
+    memswap_limit: 2g
+    stop_grace_period: 20s
+
+  worker:
+    <<: *app
+    # M4, the deep worker. It re-reads the archive at native resolution, so it needs the
+    # data bind mount (inherited from *app) and nothing else. It does NOT load a model —
+    # invariant 1 — it goes through shared/queue.py to the one vllm process.
+    command: ["python3", "-m", "services.worker"]
+    environment:
+      <<: *app-env
+    mem_limit: 2g            # SPEC §7.1 "OS + headroom | 35"
+    memswap_limit: 2g
+    stop_grace_period: 20s
+
+  monitor:
+    <<: *app
+    # M5, standing tasks. Reads config/tasks.yaml (mounted ro with the rest of config/).
+    command: ["python3", "-m", "services.monitor"]
+    environment:
+      <<: *app-env
+    mem_limit: 2g            # SPEC §7.1 "OS + headroom | 35"
+    memswap_limit: 2g
+    stop_grace_period: 20s
+
+  # ---------------------------------------------------------------------------------------
+  # index and mcp: profiled OFF by default, and that is not an oversight.
+  #
+  # As built, M2 (services/index) and the action server (services/mcp) are IN-PROCESS
+  # LIBRARIES, not daemons. Neither has a __main__; `from services.index import
+  # build_index` and `ActionServer()` are how their callers use them today, and the MCP
+  # brakes (cooldown, dedupe, append-only log) are enforced inside the calling process.
+  # Running them as separate containers would mean a second ActionLog writer against
+  # data/actions.jsonl, and that log is append-only and cannot be un-fired
+  # (CLAUDE.md invariant 5).
+  #
+  # They are listed so SPEC §12's service list is complete and their memory rows are
+  # accounted for. Enable them only after their owners add a real entrypoint AND the
+  # single-writer question above has an answer.
+  # ---------------------------------------------------------------------------------------
+
+  index:
+    profiles: ["standalone"]
+    <<: *app
+    command: ["python3", "-m", "services.index"]
+    environment:
+      <<: *app-env
+    mem_limit: 2g            # SPEC §7.1 "OS + headroom | 35"
+    memswap_limit: 2g
+    restart: "no"            # no __main__ yet — do not restart-loop on the failure
+
+  mcp:
+    profiles: ["standalone"]
+    <<: *app
+    command: ["python3", "-m", "services.mcp"]
+    environment:
+      <<: *app-env
+    mem_limit: 1g            # SPEC §7.1 "OS + headroom | 35"
+    memswap_limit: 1g
+    restart: "no"            # no __main__ yet — do not restart-loop on the failure
+
+# ---------------------------------------------------------------------------------------
+# DEEPSTREAM — SPEC §7.1 row "DeepStream | 5", deliberately NOT a service here.
+#
+# ingest.gate.backend is `motion` in config/settings.yaml: ffmpeg downscales to a 32x32
+# grayscale thumbnail and the diff runs in pure Python over ~1 KB/frame. No DeepStream,
+# no new dependency. DeepStream is absent from this box and its sm_121 support is
+# unverified (CLAUDE.md), so adding a container for it would be inventing a tag.
+#
+# The 5 GB row stays unallocated so that flipping ingest.gate.backend to `deepstream`
+# later does not require re-cutting anyone else's budget.
+# ---------------------------------------------------------------------------------------
+
+# No top-level `volumes:` block, on purpose. Everything durable is a bind mount:
+# ./data for the archive, clips and the append-only logs, ./deploy/volumes for infra
+# state and model caches. `docker compose down -v` must not be able to delete footage.

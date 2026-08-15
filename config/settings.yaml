@@ -1,0 +1,440 @@
+# Every tunable number in the system. CLAUDE.md: no magic numbers in service code.
+# If you are about to write a literal into a service, it belongs here instead.
+#
+# Values marked UNRESOLVED depend on an open decision in SPEC §10. Do not silently
+# pick one — flag it.
+
+camera:
+  id: cam01                      # constant today; the field exists so we never reindex
+
+paths:
+  archive: data/archive          # segment files, native resolution, never downscaled
+  clips: data/clips              # evidence clips cut for actions and deep answers
+  action_log: data/actions.jsonl # append-only, SPEC §6.4
+  chat_log: data/chats.jsonl     # chat turns + job refs, SPEC §11.4
+
+# --------------------------------------------------------------------------------------
+# Recorder — SPEC §2.1
+# --------------------------------------------------------------------------------------
+recorder:
+  ffmpeg_bin: ffmpeg             # installed 2026-08-15: 6.1.1, with cuda/nvdec/nvenc
+  clip_timeout_seconds: 20.0     # a clip cut runs inside the action-log lock, so a hang
+                                 # here blocks both M3 and M5. Bound it.
+  segment_seconds: 60            # a 30 s fetch touches <=2 files; 1440 files/day
+  filename_pattern: "{camera_id}_%Y%m%d_%H%M%S.mp4"
+  container: mp4
+  # The archive is what the deep worker re-reads. Never downscale it, never re-encode
+  # it to save disk. CLAUDE.md invariant 7.
+  copy_codec: true
+  # SPEC §10 D2 — RESOLVED: a USB webcam is the primary source. Live, no network, and an
+  # event can be staged in front of it on cue. /dev/video* selects the device path;
+  # rtsp:// and a file path both still work unchanged.
+  source: /dev/video0
+  device:
+    # Capture MODE, not a downscale. Verified against the attached camera 2026-08-15:
+    #   ffmpeg -f v4l2 -list_formats all -i /dev/video0
+    #   mjpeg: 1920x1080, 1080x1920, 3840x2160, 1728x3072   (no raw formats at all)
+    # 1080p matches SPEC §2.1's archive budget. 3840x2160 is offered and would give the
+    # deep worker more detail to find, at ~4x the disk — revisit only if D1 lands early.
+    # NOTE: 1280x720 is NOT supported by this camera; ffmpeg would silently substitute.
+    video_size: 1920x1080
+    framerate: 30
+    # Mandatory here, not optional: this camera exposes no raw format, and the only
+    # alternative it advertises is HEVC, which this ffmpeg build cannot take over v4l2.
+    input_format: mjpeg
+    # A webcam cannot be stream-copied into mp4, so this path encodes at capture
+    # resolution. Invariant 7 forbids downscaling the archive, not encoding it.
+    # h264_nvenc uses the dedicated encoder block, so it costs no SM time the VLM wants.
+    # Verified working on this GB10. Fall back to libx264 if nvenc ever misbehaves.
+    encoder: h264_nvenc
+    encoder_args: []
+    # Load-bearing, not a quality knob. A stream-copied clip can only START on a
+    # keyframe, so this bounds how accurately an evidence clip (and the deep worker's
+    # seek) can hit a requested time range. Measured on this box: an 8.3 s GOP turned a
+    # 2.0 s request into 8.07 s of footage beginning 6 s early; 1 s returns 2.1 s.
+    # Lower costs a little disk and buys temporal precision. Do not raise it.
+    keyframe_interval_seconds: 1.0
+  preview:
+    # A rolling JPEG of what the camera sees right now, for the UI's live view.
+    #
+    # It is a SECOND OUTPUT of the recorder's own ffmpeg, not a second reader: v4l2 gives
+    # exclusive access to /dev/video0, so nothing else can open the camera while the
+    # recorder holds it. One input, two sinks.
+    #
+    # The tradeoff, stated plainly: this puts a non-archive output inside the process
+    # SPEC §2.1 says must keep recording no matter what. If the JPEG write fails, ffmpeg
+    # exits and the supervisor restarts it — a few seconds of archive gap for a cosmetic
+    # feature. It writes to `paths` under the repo, which the recorder creates, so the
+    # realistic failure is a full disk (which loses the archive anyway). Set
+    # `enabled: false` if you want the archive path to carry zero extra risk.
+    enabled: true
+    path: data/live.jpg
+    fps: 2                       # preview only; does not touch ingest.sample_fps
+    width: 640                   # a downscale of the PREVIEW, never of the archive
+    quality: 6                   # ffmpeg -q:v, 2 (best) .. 31
+  rtsp_transport: tcp            # UDP drops frames silently; a hole in the archive is
+                                 # indistinguishable from "nothing happened".
+  realtime_file_playback: true   # a file source gets -re, so a recorded demo does not
+                                 # write a day of wall-clock-named segments in a minute
+  stop_timeout_seconds: 10.0     # SIGTERM, then SIGKILL. ffmpeg needs the grace period
+                                 # to finalise the mp4 moov atom, or the segment is
+                                 # unplayable — and unplayable footage is lost footage.
+  restart:
+    initial_backoff_seconds: 1.0
+    max_backoff_seconds: 60.0
+    backoff_multiplier: 2.0
+    healthy_seconds: 30.0        # a run this long resets the backoff ladder
+    max_consecutive_failures: 0  # 0 = never give up. The recorder outliving the
+                                 # analysis stack is the entire point of §2.1.
+    stall_timeout_seconds: 180.0 # alive but the archive stopped growing = dead to us
+    poll_interval_seconds: 1.0
+  max_drift_seconds: 2.0         # a "60 s" segment is never exactly 60 s. Larger than
+                                 # any plausible segmenter overshoot, smaller than any
+                                 # gap worth reporting. Beyond this, a jump between
+                                 # consecutive filenames is a recorder restart (and so
+                                 # a real hole), not one long file.
+
+# --------------------------------------------------------------------------------------
+# Ingest — SPEC §2.2 / §2.3 / §2.4
+# --------------------------------------------------------------------------------------
+ingest:
+  window_seconds: 5              # latency floor is "wait for the window to close"
+  stride_seconds: 4              # 1 s overlap so a boundary event is not halved
+  sample_fps: 1                  # -> 5 frames per window
+  live_short_side_px: 512        # KV-cache pressure dial, NOT a speed dial (SPEC §2.5)
+
+  overlay:
+    # Burned AFTER the resize. The VLM reads it for temporal localization; if it goes
+    # illegible, localization fails silently. CLAUDE.md invariant 8.
+    enabled: true
+    format: "%Y-%m-%d %H:%M:%S UTC"
+    position: bottom
+    min_height_px: 16            # below this the overlay stops surviving downscale
+    fontfile: /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf   # verified present
+    fontsize: 20
+    padding_px: 8
+    # White-on-black-box is the only combination that survives both a bright and a dark
+    # scene, which is why it is not left to taste.
+    fontcolor: white
+    box_opacity: 0.6
+    # The overlay is grown until it clears min_height_px after the downscale; this caps
+    # that search so an absurd config cannot eat the frame it is annotating.
+    max_fontsize: 64
+    # See SPEC §10 D8 — the overlay is UTC while the UI renders local. It is drawn onto
+    # the SAMPLED FRAMES the model reads, never into the archive, so changing it is a
+    # config change rather than a re-shoot.
+
+  # null = use recorder.ffmpeg_bin, so a CUDA build in /opt is configured once, not twice
+  ffmpeg_bin: null
+  # Ceiling on any single ffmpeg call. A window is 5 s of footage and decode is a few
+  # hundred ms; 30 s means "the subprocess is wedged", not "it is busy". Unbounded is not
+  # an option: ingest is a loop and one hung decode stops all of it.
+  ffmpeg_timeout_seconds: 30.0
+  # ffmpeg's mjpeg -q:v, 2 (best) to 31. Frames are base64'd into the request body, so
+  # this is a prefill-BYTES dial, not a latency one (prefill is ~5% of chunk cost). 3
+  # keeps the burned clock crisp — the one thing that must survive compression (inv. 8).
+  frame_jpeg_quality: 3
+  # null = derive from vlm.profiles.live.request_timeout_seconds plus the queue's pause
+  # cap, i.e. the longest a well-behaved ingest job can legitimately take (SPEC §7).
+  caption_timeout_seconds: null
+  poll_interval_seconds: 1.0     # well under the 4 s stride, so the tail is never the
+                                 # latency floor
+
+  bench:
+    # SPEC §9 block 0. If a single 5-frame caption exceeds this, D1 is forced to the
+    # smaller Cosmos variant — that is the decision this number exists to trigger.
+    target_caption_seconds: 4.0
+
+  gate:
+    # Frames per second the GATE samples at — not ingest.sample_fps, which is what the
+    # VLM sees. Two per second over a 5 s window is 10 thumbnails at 1 KB each: enough
+    # pairs that a half-second movement lands between two, cheap enough that the gate
+    # stays the ~0.1 s line item SPEC §8 budgets for it.
+    sample_fps: 2
+    # SPEC §2.3 — the main reason real-time is achievable.
+    enabled: true
+    target_skip_rate: 0.80       # aim: >=80% of windows never reach the VLM
+    warn_skip_rate: 0.60         # below this the gate is mistuned and real-time is gone
+    motion_threshold: 0.02       # mean absolute inter-frame delta, 0..1
+    min_object_confidence: 0.40
+    # DeepStream is absent and its sm_121 support unverified, so `motion` ships first:
+    # ffmpeg downscales to a tiny grayscale thumbnail (C speed) and the diff is computed
+    # over ~1 KB/frame in pure Python — no numpy, no OpenCV, no new dependency.
+    backend: motion              # motion | deepstream | tensorrt
+    thumbnail_size: 32           # 32x32 gray = 1024 bytes/frame
+    warmup_windows: 2            # never gate away the first windows; there is no
+                                 # reference frame yet and a false skip is invisible
+
+# --------------------------------------------------------------------------------------
+# VLM — one process, two profiles. CLAUDE.md invariants 1 and 6.
+# --------------------------------------------------------------------------------------
+vlm:
+  # `stub` returns deterministic synthetic captions so the pipeline can run before a
+  # model is serving. It is NOT a test mock. Now resolved — a real model is serving.
+  backend: vllm                  # stub | vllm
+  endpoint: http://localhost:8000/v1
+  # SPEC §10 D1 — RESOLVED 2026-08-15 by the block-0 benchmark (see below).
+  # gemma-4-E2B-it, Q4_K_XL + mmproj-F16: ~4 GB resident. Chosen on the one axis that
+  # governs the live path — decode is bandwidth-bound, so 273 GB/s ÷ ~4 GB ≈ 68 tok/s,
+  # and 80 tokens lands inside SPEC §2.4's ~2 s budget. The 15-30 GB vision models also
+  # on this box are 4-8x slower per token and cannot hold a 4 s stride.
+  # Served by the CUDA-13 ARM64 llama-server bundled with LM Studio — a prebuilt sm_121
+  # binary, which is exactly what CLAUDE.md says to verify before committing.
+  model: gemma-4-E2B-it-UD-Q4_K_XL.gguf
+  precision: bf16                # quantized Cosmos Reason variants hallucinate
+
+  # Fallback HTTP timeout. Per-profile values below take precedence. Something must be
+  # set: max_inflight is 1, so a wedged endpoint with no timeout holds the only slot
+  # forever and hangs BOTH surfaces at once.
+  request_timeout_seconds: 120
+
+  prompts:
+    # Caption text lives here so M1 and the rollup job cannot drift to different
+    # prompts and quietly produce two incomparable caption styles in one index.
+    caption: >-
+      Describe what is happening in this scene in at most two short sentences.
+      State the objects, people and vehicles present and what they are doing.
+      If a timestamp is burned into the frame, cite it. Report only what is
+      visible; do not speculate about intent.
+    deep: >-
+      Watch this footage closely and answer the question. Cite the burned-in
+      timestamps for anything you report. If the footage does not show enough
+      to answer, say so explicitly rather than guessing.
+
+  profiles:
+    live:
+      enable_reasoning: false    # a CoT caption is 1000+ tokens -> 60 s+/chunk
+      max_tokens: 80             # decode is ~95% of cost; this is THE dial
+      temperature: 0.0
+      request_timeout_seconds: 30   # expected ~2 s. Anything near this is pathological.
+    deep:
+      enable_reasoning: true
+      max_tokens: 600            # ~35 s of decode at 17 tok/s. Do not raise casually.
+      temperature: 0.0
+      sample_fps: 4
+      native_resolution: true
+      # Deliberately longer than the 90 s job timeout the user is shown (SPEC §4.3), so
+      # that the job-level timeout fires first with a sentence instead of the transport
+      # dying with a stack trace.
+      request_timeout_seconds: 120
+
+  queue:
+    # SPEC §7 priority order. Ingest may be paused, never starved — M5 has nothing to
+    # match against if captions stop arriving.
+    priorities: [interactive, verification, ingest]
+    max_ingest_pause_seconds: 5
+    max_inflight: 1              # one camera = one request in flight; batching is moot
+
+# --------------------------------------------------------------------------------------
+# Index — SPEC §3.2 / §3.4
+# --------------------------------------------------------------------------------------
+index:
+  store:
+    # `memory` runs with no Milvus and no NGC key, so M3 can be built against a working
+    # retrieval pipeline today. Flip to `milvus` once the container is up.
+    backend: memory              # memory | milvus
+    # REQUIRED for a multi-process run, not optional. M1, M3 and M5 are separate
+    # processes; with this null each gets its own empty in-memory corpus, ingest's
+    # captions die with the ingest process, and every question retrieves nothing —
+    # which the groundedness gate then correctly reports as "not answerable".
+    # Flipping index.store.backend to `milvus` makes this moot.
+    memory_path: data/index.jsonl
+  milvus:
+    host: localhost
+    port: 19530
+    collection: chunks
+    index_type: AUTOINDEX
+    metric_type: COSINE
+    live_partition: captioned    # gated nulls live in their own partition, see below
+    gated_partition: gated
+  embed:
+    backend: hashing             # hashing | nim
+    model: llama-3.2-nemoretriever-300m-embed-v1
+    dims: 768                    # Matryoshka-truncated
+    endpoint: http://localhost:8001/v1
+    path: /embeddings
+    timeout_seconds: 30
+    # nemoretriever is asymmetric — queries and passages use different input types.
+    # Swapping these quietly costs recall rather than failing, so they are explicit.
+    query_input_type: query
+    passage_input_type: passage
+  rerank:
+    backend: lexical             # lexical | nim
+    model: llama-3.2-nv-rerankqa-1b-v2
+    endpoint: http://localhost:8002/v1
+    path: /ranking               # NIM rerank is NOT an OpenAI-shaped route
+    timeout_seconds: 30
+  search:
+    ann_k: 20
+    rerank_top_n: 5
+  browse:
+    # Listing the index in time order (the /browse page), not retrieval. Milvus has no
+    # ORDER BY on `query`, so ordering means scanning the matching scalars and sorting
+    # client-side; this is that scan's batch size. Two scalars per row, so a large batch
+    # is cheap — but it is bounded so a day of windows does not arrive as one response.
+    # The in-memory backend ignores it: it already holds every record.
+    scan_batch: 1000
+  rollup:
+    enabled: false               # stretch goal — SPEC §10 D4
+    window_seconds: 60
+
+# --------------------------------------------------------------------------------------
+# Ask agent — SPEC §4
+# --------------------------------------------------------------------------------------
+agent:
+  # SPEC §10 D3 — RESOLVED 2026-08-15. Neither Nemotron variant was reachable (no NGC
+  # key, and no ARM64/sm_121 container could be verified). The live VLM is multimodal
+  # and answers text-only prompts perfectly well, so M3 and M5 stage-2 share the SAME
+  # served model and the SAME process as the VLM.
+  # This is stricter than SPEC §7's two-process design, not looser: invariant 1 exists
+  # because a second model instance OOMs the box, and one process makes that impossible.
+  # The priority queue already arbitrates the contention — that is what it is for.
+  model: gemma-4-E2B-it-UD-Q4_K_XL.gguf
+  backend: nim                   # stub | nim (OpenAI-compatible; llama-server speaks it)
+  endpoint: http://localhost:8000/v1   # same llama-server as the VLM — one process
+  max_tokens: 512
+  host: 0.0.0.0
+  port: 8080
+  groundedness_gate: true        # SPEC §4.2 — retrieval distance is NOT confidence
+  request_timeout_seconds: 30
+  temperature: 0.0
+  ui_dir: ui
+  search:
+    default_lookback_seconds: 86400
+  chunks:
+    lookback_seconds: 3600
+    max: 500
+  browse:
+    # The index browser (ui/browse.html) — paging the captions the system wrote, in
+    # wall-clock order. Not retrieval: no query, no rerank, no top-n.
+    page_size: 25                # rows per page when the client does not ask
+    max_page_size: 200           # a client asking for more gets this; the caption column
+                                 # is the payload and 200 rows is already ~60 KB of text
+    caption_preview_chars: 240   # where the row's caption is clipped before "more" —
+                                 # long enough for a live caption (80 tokens), short
+                                 # enough that a deep one (~600) does not own the page
+  actions:
+    lookback_seconds: 86400
+  history:
+    max_turns: 200
+  ws:
+    ping_interval_seconds: 25.0  # a silent WebSocket dies to an idle proxy; this keeps
+                                 # the refinement channel open across a 90 s deep job
+  prompts:
+    # SPEC §4.2's gate, in words. The model is told what captions DO and DO NOT record,
+    # because the whole decision turns on that distinction.
+    groundedness: |
+      You are checking whether a question can be answered from retrieved video captions ALONE.
+      The captions were written by a vision model at 1 fps from downscaled frames. They record what was present and what it was doing; they do NOT record fine visual detail — text on a sign, the state of a door, a colour read off a surface, a face, a plate.
+      Answer with YES or NO on the first line, then one short sentence saying why.
+      YES means: everything the question asks for is stated in the context.
+      NO means: answering would require looking at the footage again.
+      Do not answer the question itself.
+    answer: |
+      You answer questions about recorded video using retrieved captions.
+      Cite the wall-clock times of what you report, and label them UTC — the captions' timestamps are UTC.
+      State plainly when the captions do not record what was asked rather than guessing; a request_deep_analysis call is the correct response to fine visual detail.
+      Two or three sentences. No preamble.
+
+  stub:
+    # Fraction of the question's content words that must appear in the retrieved
+    # captions before the stub gate calls a question answerable. Only the stub backend
+    # reads this. Note the gate ALSO refuses outright when the question turns on a
+    # visual detail term the captions never mention, regardless of this score —
+    # lexical overlap measures vocabulary, not whether the answer is present.
+    coverage_threshold: 0.6
+  deep:
+    timeout_seconds: 90          # stated to the user, SPEC §4.3
+    max_inflight: 1
+    dedupe_identical_ranges: true
+    # SPEC §5 warned that the CoT blows the budget. On this model it is the PREFILL that
+    # blows first, and measurably so: a native-resolution 1080p frame costs ~261 prompt
+    # tokens through the vision encoder, so 4 fps fills a 32k context in ~30 s of
+    # footage. 60 s (240 frames, ~64k tokens) returns HTTP 400 from llama-server, which
+    # reaches the UI as a deep job that never completes.
+    #
+    # 25 s -> 100 frames -> ~26k tokens, inside 32k with room for the answer, and still
+    # within SPEC §5's 20-60 s realistic target. Raise `SPARK_CTX` in
+    # scripts/serve_models.sh before raising this. A longer range is REFUSED with the
+    # numbers in the message rather than silently truncated.
+    max_range_seconds: 25.0
+    # Padding either side of the cited chunks: a 5 s window that clipped the event at
+    # its boundary is precisely the case being escalated.
+    range_pad_seconds: 5.0
+    # With no hits at all there is nothing to cite, so the worker re-watches the most
+    # recent stretch and says so. Kept <= max_range_seconds: a larger value would be
+    # silently clamped on every no-hit escalation, which is a dial that does nothing.
+    fallback_window_seconds: 25.0
+    poll_interval_seconds: 0.25
+    decode_timeout_seconds: 30.0
+    frame_quality: 2             # ffmpeg -q:v for sampled frames; 2 is near-lossless
+    # Multiplier applied when the answer admits it could not see enough. Confidence
+    # here means COVERAGE, not certainty — see services/worker/analysis.py.
+    hedged_confidence_factor: 0.35
+    job_history: 256             # completed jobs retained for /api/chat/history replay
+
+# --------------------------------------------------------------------------------------
+# Monitor — SPEC §6
+# --------------------------------------------------------------------------------------
+monitor:
+  tasks_file: config/tasks.yaml
+  stage1_cosine_threshold: 0.35  # deliberately loose — over-trigger here, filter later
+  stage2_sustain_default: 120
+  default_cooldown_seconds: 300
+  dedupe_overlap_seconds: 5      # consecutive chunks share 1 s and double-report
+  verify_promoted: true          # stage 3 attaches; it is NOT a blocking precondition
+
+  # Stage 2 — LLM confirm. Deliberately reads `agent.backend` rather than a key of its
+  # own, so M3 and M5 can never end up talking to different models.
+  confirm_path: /chat/completions   # NIM has moved this route between releases
+  confirm_timeout_seconds: 30.0
+  confirm_max_tokens: 8             # stage 2 answers one word — invariant 6 in spirit
+  stage2_stub_min_overlap: 0.5      # StubConfirmer only; no effect on the real path
+
+  # Stage 3 — worker verify. Below the threshold the provisional action is RETRACTED;
+  # an ABSENT confidence is inconclusive and leaves the action standing, because
+  # "the worker could not tell" is not the same as "the worker disagreed".
+  verify_confidence_threshold: 0.5
+  verify_question_template: >-
+    Does this footage show: {describe}? Answer yes or no, cite the burned-in
+    timestamps for anything you report, and say so explicitly if the footage does
+    not show enough to decide.
+
+# --------------------------------------------------------------------------------------
+# UI — SPEC §11
+# --------------------------------------------------------------------------------------
+ui:
+  display_timezone: Asia/Kolkata # the ONLY place local time is allowed (SPEC §11.5)
+  time_format: "%H:%M:%S"
+  poll_interval_ms: 1000
+  # SPEC §11.1 / CLAUDE.md invariant 10 — the demo runs with the network off.
+  vendored_assets_only: true
+
+# --------------------------------------------------------------------------------------
+# Doctor — `make doctor` checks this box against the CLAUDE.md machine-state table.
+# --------------------------------------------------------------------------------------
+doctor:
+  expected_arch: aarch64
+  expected_compute_capability: "12.1"   # sm_121. NOT sm_100 (datacenter Blackwell),
+                                        # NOT sm_120 (RTX 50xx). Wheels lie about this.
+  min_unified_memory_gb: 120
+  min_free_disk_gb: 100
+  archive_gb_per_day: 43                # 1080p @ 4 Mbps — used to report days of runway
+  min_python: [3, 11]                   # [major, minor], compared as a list
+  # Local model runners hold unified memory and violate invariant 1's budget. Warn, do
+  # not fail: the user may be mid-shutdown.
+  model_runner_names: [lm-studio, lmstudio, unsloth, ollama, vllm]
+  model_runner_ports: [8888, 1234]      # 1234 is LM Studio's default server port
+
+# --------------------------------------------------------------------------------------
+# Logging — CLAUDE.md conventions. We cannot tune what we cannot see.
+# --------------------------------------------------------------------------------------
+logging:
+  level: INFO
+  format: json
+  vlm_calls:                     # every VLM call logs all of these
+    - model
+    - profile
+    - prompt_tokens
+    - completion_tokens
+    - wall_time_ms

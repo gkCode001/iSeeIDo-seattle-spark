@@ -1,0 +1,31 @@
+# Standing tasks for M5 — SPEC §6.1.
+#
+# This file is the cold-start seed so a fresh boot has tasks without anyone clicking
+# (SPEC §11.3). Tasks registered at runtime through `register_task` live in the running
+# monitor; persist them back here if they should survive a restart.
+#
+# Fields:
+#   task_id   stable slug, used as the cooldown and dedupe key
+#   describe  natural language, embedded once at registration for the stage-1 cosine
+#   window    seconds of sustained stage-2 match before promoting
+#   action    save_clip | raise_alert | file_ticket
+#   cooldown  seconds before this task may fire again. The demo failure mode is
+#             thirty alerts for one event — see SPEC §6.4.
+#   active    LOCAL wall-clock window, may wrap midnight
+
+tasks:
+  - task_id: fire-door-blocked
+    describe: a vehicle stopped in front of the fire door
+    window: 120
+    action: raise_alert
+    cooldown: 300
+    active: "18:00-06:00"
+    enabled: true
+
+  - task_id: loading-bay-activity
+    describe: a person unloading boxes from a vehicle at the loading bay
+    window: 30
+    action: save_clip
+    cooldown: 120
+    active: "00:00-24:00"
+    enabled: true

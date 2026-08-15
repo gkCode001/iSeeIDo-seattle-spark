@@ -1,0 +1,29 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ruff_cache/
+.pytest_cache/
+
+# Runtime state written by scripts/start.sh — pids and service logs.
+.run/
+
+# Recorded video and everything derived from it. The archive is ~22 GB/day measured
+# (SPEC §2.1 budgets 43 GB/day); the index and logs are rewritten continuously. None of
+# it is source, and all of it is reproducible by running the system.
+data/archive/
+data/clips/
+data/*.jsonl
+data/*.lock
+data/live.jpg
+
+# Keep the directories themselves so a fresh clone has somewhere to record to.
+!data/archive/.gitkeep
+!data/clips/.gitkeep
+
+# Model weights are fetched by scripts/fetch_models.sh, never vendored.
+*.gguf
+
+# The 2-minute fixture clip SPEC/CLAUDE.md asks for is source, not output — it is the
+# only video in the tree that belongs in git.
+!tests/fixtures/

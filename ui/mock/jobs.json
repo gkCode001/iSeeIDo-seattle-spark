@@ -1,0 +1,69 @@
+{
+  "_note": [
+    "Fixture: DeepJob.to_dict() rows (shared/schema.py, SPEC 5 / 4.3 / 11.2).",
+    "",
+    "Keyed by job_id from chat_turns.json and actions.json. On load, a persisted turn with",
+    "a job_id renders its refined block from the matching row here - which is how a page",
+    "reload keeps the 34-second answer (SPEC 11.4).",
+    "",
+    "`reasoning` is the deep path's reasoning_description, capped at ~600 tokens by",
+    "vlm.profiles.deep.max_tokens (CLAUDE.md invariant 6). The UI renders it collapsed:",
+    "proof, not prose.",
+    "",
+    "elapsed = completed_at - requested_at = 34.8 s for 7f3a, inside the 90 s timeout in",
+    "agent.deep.timeout_seconds.",
+    "",
+    "OPEN QUESTION for M3/M4 (the UI cannot fix this and must not try): the times quoted",
+    "INSIDE `answer` and `reasoning` are model output, read off the burned-in overlay,",
+    "which ingest.overlay.format burns in UTC. The text below quotes LOCAL times because",
+    "that is what SPEC 11.2's mockup shows an audience. Something has to reconcile the two",
+    "- either burn the overlay in the display timezone, or have M3 convert cited times",
+    "before returning the text. The UI renders answer text verbatim and does no",
+    "local->UTC inverse conversion anywhere: SPEC 11.5 allows exactly one conversion, in",
+    "one direction, at render."
+  ],
+  "jobs": {
+    "7f3a": {
+      "job_id": "7f3a",
+      "t_start": "2026-08-14T15:41:07Z",
+      "t_end": "2026-08-14T15:41:52Z",
+      "question": "Was the van's rear door open when it backed up?",
+      "state": "done",
+      "requested_at": "2026-08-14T15:42:20.100000Z",
+      "completed_at": "2026-08-14T15:42:54.900000Z",
+      "answer": "Yes. The rear doors are open from 21:11:19 onward - visible as the van turns. Two figures approach from the right at 21:11:41.",
+      "reasoning": "Re-decoded 45 s at native resolution, 4 fps (181 frames). Frames up to 21:11:18 show the van at an angle with the rear face occluded by the door pillar, which is why the 1 fps live caption could not commit either way. At 21:11:19 the van yaws roughly 15 degrees and both rear doors are visible, swung outward past the body line; the left door edge casts a shadow onto the loading apron that tracks with the door, not the body, confirming it is open rather than a reflection. The doors remain open in every subsequent frame. At 21:11:41 two figures enter from the right edge and reach the rear of the van by 21:11:47. No cargo movement is visible within the analysed range.",
+      "confidence": 0.88,
+      "evidence_clip": "data/clips/cam01_20260814T154107_154152_ask.mp4",
+      "error": null
+    },
+    "b2c9": {
+      "job_id": "b2c9",
+      "t_start": "2026-08-14T15:41:07Z",
+      "t_end": "2026-08-14T15:41:52Z",
+      "question": "Is a vehicle stopped in front of the fire door?",
+      "state": "done",
+      "requested_at": "2026-08-14T15:41:16Z",
+      "completed_at": "2026-08-14T15:41:52Z",
+      "answer": "Confirmed. A white panel van is stationary across the marked fire door bay for the full 45 s window.",
+      "reasoning": "Native-resolution re-read shows the painted fire-door keep-clear hatching fully occluded by the vehicle body from 21:11:11 to the end of the range. The van does not translate between frames; only the rear doors move.",
+      "confidence": 0.94,
+      "evidence_clip": "data/clips/cam01_20260814T154107_154152.mp4",
+      "error": null
+    },
+    "d41e": {
+      "job_id": "d41e",
+      "t_start": "2026-08-14T16:03:55Z",
+      "t_end": "2026-08-14T16:04:10Z",
+      "question": "Is a vehicle stopped in front of the fire door?",
+      "state": "done",
+      "requested_at": "2026-08-14T16:04:04Z",
+      "completed_at": "2026-08-14T16:04:39Z",
+      "answer": "No vehicle. The dark region in front of the fire door is a shadow cast by headlight glare crossing the roller door.",
+      "reasoning": "At native resolution the region has no edges consistent with a vehicle body, no wheels and no parallax against the door frame across 60 frames. The apparent shape tracks a moving light source off-frame to the left. The 1 fps live caption resolved it as a halted object; at 4 fps it is clearly a travelling reflection.",
+      "confidence": 0.91,
+      "evidence_clip": "data/clips/cam01_20260814T160355_160410.mp4",
+      "error": null
+    }
+  }
+}

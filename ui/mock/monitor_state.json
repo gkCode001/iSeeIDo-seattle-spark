@@ -1,0 +1,78 @@
+{
+  "_note": [
+    "Fixture for the SPEC 11.3 funnel view. There is no dataclass for this yet -- it is",
+    "live monitor state, not a persisted record -- so this file IS the proposed contract",
+    "for GET /api/monitor/state. See the report handed to M5/M3.",
+    "",
+    "Everything the UI ticks between polls is derived from an ABSOLUTE timestamp, never",
+    "from a decrementing counter:",
+    "  cooldown remaining = cooldown_seconds - (now - last_fired_ts)",
+    "  sustain elapsed    = now - stage2.since",
+    "That way a slow poll, a paused tab or a dropped frame cannot make the brake look",
+    "shorter than it is.",
+    "",
+    "In MOCK MODE ONLY these timestamps are rebased so that `generated_at` becomes `now`",
+    "(see rebaseMonitorState in ui/static/data.js), which is what makes the cooldown",
+    "visibly count down during a rehearsal. Live mode uses server values verbatim.",
+    "",
+    "fire-door-blocked is deliberately shown STILL MATCHING while cooling: the event keeps",
+    "firing stage 1 and stage 2 for four more minutes and nothing goes out. That is the",
+    "SPEC 6.4 brake proved rather than asserted."
+  ],
+  "generated_at": "2026-08-14T15:42:07Z",
+  "tasks": [
+    {
+      "task_id": "fire-door-blocked",
+      "state": "cooling",
+      "in_active_window": true,
+      "stage1": {
+        "score": 0.71,
+        "threshold": 0.35,
+        "matched": true,
+        "chunk_id": "cam01_20260814T154147_154152"
+      },
+      "stage2": {
+        "verdict": "match",
+        "since": "2026-08-14T15:40:31Z",
+        "sustain_window_s": 120,
+        "last_chunk_id": "cam01_20260814T154147_154152"
+      },
+      "stage3": {
+        "state": "done",
+        "job_id": "b2c9",
+        "verdict": "verified"
+      },
+      "last_fired_ts": "2026-08-14T15:41:14Z",
+      "cooldown_seconds": 300,
+      "match_range": {
+        "t_start": "2026-08-14T15:41:07Z",
+        "t_end": "2026-08-14T15:41:52Z"
+      }
+    },
+    {
+      "task_id": "loading-bay-activity",
+      "state": "armed",
+      "in_active_window": true,
+      "stage1": {
+        "score": 0.19,
+        "threshold": 0.35,
+        "matched": false,
+        "chunk_id": "cam01_20260814T154147_154152"
+      },
+      "stage2": {
+        "verdict": null,
+        "since": null,
+        "sustain_window_s": 30,
+        "last_chunk_id": null
+      },
+      "stage3": {
+        "state": "idle",
+        "job_id": null,
+        "verdict": null
+      },
+      "last_fired_ts": null,
+      "cooldown_seconds": 120,
+      "match_range": null
+    }
+  ]
+}

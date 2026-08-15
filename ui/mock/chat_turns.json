@@ -1,0 +1,49 @@
+{
+  "_note": [
+    "Fixture: ChatTurn.to_dict() rows (shared/schema.py, SPEC 11.4) = data/chats.jsonl.",
+    "",
+    "This file exists to prove one specific thing from SPEC 11.4: a refinement lands AFTER",
+    "the turn ends, so the turn persists the JOB, not just the message text. turn-0002",
+    "below carries job_id 7f3a and no refined text of its own; the refined answer is",
+    "rebuilt on load from jobs.json. Reload the page and the 34-second answer is still",
+    "there, still stacked under the provisional, still not overwriting it.",
+    "",
+    "There is deliberately no retrieval-metadata field here. The '20 -> 5 chunks' line in",
+    "the SPEC 11.2 mockup is derived at render time from config (index.search.ann_k /",
+    "rerank_top_n) and the cited chunk ids, so no schema change was needed for chrome.",
+    "",
+    "turn-0001 is the SPEC 10 D6 question the index genuinely answers (grounded: true, no",
+    "job). turn-0002 is the one it genuinely cannot (grounded: false -> escalated)."
+  ],
+  "turns": [
+    {
+      "turn_id": "turn-0001",
+      "ts": "2026-08-14T15:42:02Z",
+      "question": "When did the van arrive at the loading door?",
+      "provisional_answer": "A white panel van reverses toward the loading door starting at 21:11:07 and is stopped across the fire door bay by 21:11:11. It has not moved again through 21:11:52.",
+      "grounded": true,
+      "cited_chunk_ids": [
+        "cam01_20260814T154107_154112",
+        "cam01_20260814T154111_154116",
+        "cam01_20260814T154147_154152"
+      ],
+      "job_id": null,
+      "latency_s": 1.4
+    },
+    {
+      "turn_id": "turn-0002",
+      "ts": "2026-08-14T15:42:18Z",
+      "question": "Was the van's rear door open when it backed up?",
+      "provisional_answer": "A white panel van reversed toward the loading door around 21:11. The caption doesn't record whether its rear door was open.",
+      "grounded": false,
+      "cited_chunk_ids": [
+        "cam01_20260814T154107_154112",
+        "cam01_20260814T154119_154124",
+        "cam01_20260814T154139_154144",
+        "cam01_20260814T154147_154152"
+      ],
+      "job_id": "7f3a",
+      "latency_s": 2.1
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+# The real env file holds NGC_API_KEY and HF_TOKEN. Only .env.example is tracked.
+.env
+
+# Infra state and model caches: etcd/, minio/, milvus/, nim/, hf/. Tens of GB of model
+# weights. Kept here rather than under data/ so the archive bind mount stays purely the
+# footage the deep worker re-reads.
+volumes/

@@ -1,0 +1,152 @@
+{
+  "_note": [
+    "Fixture: ChunkRecord.to_dict() rows (shared/schema.py, SPEC 3.1). Field names are",
+    "exact; extra keys live only in this _note wrapper so the records round-trip.",
+    "",
+    "Wall clock is UTC with a Z suffix, always (CLAUDE.md invariant 2). The demo footage",
+    "sits at 15:41Z so that it RENDERS as 21:11 in ui.display_timezone (Asia/Kolkata,",
+    "UTC+05:30) and therefore matches the SPEC 11.2 / 11.3 / 11.4 mockups on screen.",
+    "Segment filenames are recorder-side and therefore UTC-named (SPEC 2.1).",
+    "",
+    "embedding is deliberately empty: 768 floats x N rows is noise in a UI fixture and",
+    "the UI never reads the vector. shared/schema.py defaults it to [].",
+    "",
+    "The 16:03:55-16:04:10 group deliberately straddles a segment boundary so the player",
+    "has to list two files for one range (CLAUDE.md invariant 3: fetch by time range,",
+    "never by filename)."
+  ],
+  "chunks": [
+    {
+      "chunk_id": "cam01_20260814T154103_154108",
+      "camera_id": "cam01",
+      "t_start": "2026-08-14T15:41:03Z",
+      "t_end": "2026-08-14T15:41:08Z",
+      "segment": "cam01_20260814_154100.mp4",
+      "pts_offset": 3.0,
+      "tier": "live",
+      "gated": true,
+      "caption": "",
+      "embedding": []
+    },
+    {
+      "chunk_id": "cam01_20260814T154107_154112",
+      "camera_id": "cam01",
+      "t_start": "2026-08-14T15:41:07Z",
+      "t_end": "2026-08-14T15:41:12Z",
+      "segment": "cam01_20260814_154100.mp4",
+      "pts_offset": 7.0,
+      "tier": "live",
+      "gated": false,
+      "caption": "A white panel van reverses toward the loading door. Its brake lights are lit.",
+      "embedding": []
+    },
+    {
+      "chunk_id": "cam01_20260814T154111_154116",
+      "camera_id": "cam01",
+      "t_start": "2026-08-14T15:41:11Z",
+      "t_end": "2026-08-14T15:41:16Z",
+      "segment": "cam01_20260814_154100.mp4",
+      "pts_offset": 11.0,
+      "tier": "live",
+      "gated": false,
+      "caption": "The van is stopped across the marked fire door bay. No one has left the cab.",
+      "embedding": []
+    },
+    {
+      "chunk_id": "cam01_20260814T154115_154120",
+      "camera_id": "cam01",
+      "t_start": "2026-08-14T15:41:15Z",
+      "t_end": "2026-08-14T15:41:20Z",
+      "segment": "cam01_20260814_154100.mp4",
+      "pts_offset": 15.0,
+      "tier": "live",
+      "gated": false,
+      "caption": "The van holds position in front of the fire door, engine running.",
+      "embedding": []
+    },
+    {
+      "chunk_id": "cam01_20260814T154119_154124",
+      "camera_id": "cam01",
+      "t_start": "2026-08-14T15:41:19Z",
+      "t_end": "2026-08-14T15:41:24Z",
+      "segment": "cam01_20260814_154100.mp4",
+      "pts_offset": 19.0,
+      "tier": "live",
+      "gated": false,
+      "caption": "The van turns slightly; its rear end faces the loading door.",
+      "embedding": []
+    },
+    {
+      "chunk_id": "cam01_20260814T154139_154144",
+      "camera_id": "cam01",
+      "t_start": "2026-08-14T15:41:39Z",
+      "t_end": "2026-08-14T15:41:44Z",
+      "segment": "cam01_20260814_154100.mp4",
+      "pts_offset": 39.0,
+      "tier": "live",
+      "gated": false,
+      "caption": "Two figures walk in from the right side of frame toward the stationary van.",
+      "embedding": []
+    },
+    {
+      "chunk_id": "cam01_20260814T154147_154152",
+      "camera_id": "cam01",
+      "t_start": "2026-08-14T15:41:47Z",
+      "t_end": "2026-08-14T15:41:52Z",
+      "segment": "cam01_20260814_154100.mp4",
+      "pts_offset": 47.0,
+      "tier": "live",
+      "gated": false,
+      "caption": "The two figures stand at the rear of the van. The van has not moved.",
+      "embedding": []
+    },
+    {
+      "chunk_id": "cam01_20260814T160355_160400",
+      "camera_id": "cam01",
+      "t_start": "2026-08-14T16:03:55Z",
+      "t_end": "2026-08-14T16:04:00Z",
+      "segment": "cam01_20260814_160300.mp4",
+      "pts_offset": 55.0,
+      "tier": "live",
+      "gated": false,
+      "caption": "A bright reflection moves across the roller door beside the fire door bay.",
+      "embedding": []
+    },
+    {
+      "chunk_id": "cam01_20260814T160359_160404",
+      "camera_id": "cam01",
+      "t_start": "2026-08-14T16:03:59Z",
+      "t_end": "2026-08-14T16:04:04Z",
+      "segment": "cam01_20260814_160300.mp4",
+      "pts_offset": 59.0,
+      "tier": "live",
+      "gated": false,
+      "caption": "A dark shape appears to be halted in front of the fire door.",
+      "embedding": []
+    },
+    {
+      "chunk_id": "cam01_20260814T160403_160408",
+      "camera_id": "cam01",
+      "t_start": "2026-08-14T16:04:03Z",
+      "t_end": "2026-08-14T16:04:08Z",
+      "segment": "cam01_20260814_160400.mp4",
+      "pts_offset": 3.0,
+      "tier": "live",
+      "gated": false,
+      "caption": "The shape in front of the fire door has not moved. The bay is otherwise empty.",
+      "embedding": []
+    },
+    {
+      "chunk_id": "cam01_20260814T161011_161016",
+      "camera_id": "cam01",
+      "t_start": "2026-08-14T16:10:11Z",
+      "t_end": "2026-08-14T16:10:16Z",
+      "segment": "cam01_20260814_161000.mp4",
+      "pts_offset": 11.0,
+      "tier": "live",
+      "gated": false,
+      "caption": "A person lifts boxes out of the back of a vehicle at the loading bay.",
+      "embedding": []
+    }
+  ]
+}
