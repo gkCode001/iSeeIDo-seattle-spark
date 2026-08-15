@@ -44,6 +44,11 @@
   "agent": {
     "deep": {
       "timeout_seconds": 90
+    },
+    "browse": {
+      "page_size": 25,
+      "max_page_size": 200,
+      "caption_preview_chars": 240
     }
   },
   "monitor": {

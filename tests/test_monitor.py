@@ -879,3 +879,100 @@ class BuildMonitorTest(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class MonitorRunnerTest(MonitorTestCase):
+    """M5's missing half — SPEC §6.
+
+    The funnel, the brakes and the registry were all built and tested, and none of it
+    ever ran: no ``__main__``, no production caller of ``build_monitor``. Standing tasks
+    rendered in the Watch pane and could not fire. These cover the loop that closes it.
+    """
+
+    def _feed(self, chunks):
+        from services.monitor.runner import ChunkSource
+
+        pending = list(chunks)
+
+        class Feed(ChunkSource):
+            def poll(self_inner):
+                out, pending[:] = list(pending), []
+                return out
+
+        return Feed()
+
+    def _runner(self, chunks, **kw):
+        from services.monitor.runner import MonitorRunner
+
+        return MonitorRunner(self.build_monitor(), self._feed(chunks), **kw)
+
+    def test_one_event_through_the_runner_fires_exactly_one_action(self) -> None:
+        """The headline claim, driven through the loop rather than by calling observe()
+        directly — the path the demo actually takes."""
+        chunks = make_chunks(T0, 60, FIRE_DOOR_CAPTION)
+        fired = []
+        runner = self._runner(chunks, on_action=fired.append)
+        for chunk in chunks:
+            self.clock.set(chunk.t_end)
+            runner.tick()
+        rows = [r for r in self.log_rows() if r.parent_id is None]
+        self.assertEqual(len(rows), 1, "one event must produce one action")
+        self.assertEqual(len(fired), 1, "the UI callback must see it exactly once")
+
+    def test_a_broken_chunk_source_does_not_kill_the_loop(self) -> None:
+        """A monitor that dies on one bad read stops watching, silently."""
+        from services.monitor.runner import ChunkSource, MonitorRunner
+
+        class Broken(ChunkSource):
+            def poll(self_inner):
+                raise OSError("index vanished")
+
+        runner = MonitorRunner(self.build_monitor(), Broken())
+        self.assertEqual(runner.tick(), 0)
+
+    def test_a_failing_ui_callback_does_not_stop_the_funnel(self) -> None:
+        chunks = make_chunks(T0, 40, FIRE_DOOR_CAPTION)
+
+        def explode(_entry):
+            raise RuntimeError("websocket closed")
+
+        runner = self._runner(chunks, on_action=explode)
+        for chunk in chunks:
+            self.clock.set(chunk.t_end)
+            runner.tick()
+        self.assertEqual(len([r for r in self.log_rows() if r.parent_id is None]), 1)
+
+    def test_the_tail_starts_at_the_end_by_default(self) -> None:
+        """A first run must not replay hours of history and alert on yesterday."""
+        import json
+
+        from services.monitor.runner import IndexTail
+
+        path = self.root / "index.jsonl"
+        old = make_chunks(T0, 3, FIRE_DOOR_CAPTION)
+        path.write_text("".join(json.dumps(c.to_dict()) + "\n" for c in old), encoding="utf-8")
+        self.assertEqual(IndexTail(str(path)).poll(), [])
+        self.assertEqual(len(IndexTail(str(path), seek_to_end=False).poll()), 3)
+
+    def test_the_tail_never_yields_a_half_written_row(self) -> None:
+        """The writer appends; a reader that parses a partial line loses the record."""
+        import json
+
+        from services.monitor.runner import IndexTail
+
+        path = self.root / "index.jsonl"
+        chunk = make_chunks(T0, 1, FIRE_DOOR_CAPTION)[0]
+        complete = json.dumps(chunk.to_dict()) + "\n"
+        path.write_text(complete + '{"chunk_id": "half-writ', encoding="utf-8")
+        tail = IndexTail(str(path), seek_to_end=False)
+        self.assertEqual(len(tail.poll()), 1)
+
+    def test_a_replayed_chunk_cannot_fire_twice(self) -> None:
+        """The tail resets its cursor when the corpus is rewritten, so records repeat.
+        The brakes key on the footage range, so a replay is safe — assert that."""
+        chunks = make_chunks(T0, 60, FIRE_DOOR_CAPTION)
+        runner = self._runner(chunks + chunks)
+        for chunk in chunks:
+            self.clock.set(chunk.t_end)
+            runner.tick()
+        self.assertEqual(len([r for r in self.log_rows() if r.parent_id is None]), 1)

@@ -1147,3 +1147,318 @@ code {
 @media (prefers-reduced-motion: reduce) {
   .task-form > summary::before { transition: none; }
 }
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   INDEX BROWSER — ui/browse.html
+   
+   The console is a fixed-height three-pane cockpit; this page is a document that
+   scrolls. `body` above is `overflow: hidden` with a 3-row grid, which is right for
+   the cockpit and wrong here, so the page opts out by class rather than by having
+   two stylesheets that drift.
+   ══════════════════════════════════════════════════════════════════════════════ */
+body.page--browse {
+  grid-template-rows: auto auto 1fr;
+  overflow: hidden;
+}
+
+.brand--link {
+  text-decoration: none;
+}
+.brand--link:hover {
+  color: var(--info);
+}
+.brand-sub--here {
+  color: var(--info);
+  border-color: rgba(106, 168, 224, 0.35);
+}
+a.pill {
+  text-decoration: none;
+}
+a.pill:hover {
+  color: var(--text);
+  border-color: var(--info);
+}
+
+.browse {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto auto 1fr auto;
+  gap: 12px;
+  padding: 16px 18px 14px;
+}
+
+.browse-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+.browse-head h1 {
+  margin: 0;
+  font-size: 15px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.browse-sub {
+  margin: 4px 0 0;
+  max-width: 68ch;
+}
+.browse-foot {
+  margin: 0;
+  max-width: 110ch;
+}
+
+/* ── corpus counters ─────────────────────────────────────────────────────────── */
+.corpus {
+  display: flex;
+  gap: 10px;
+}
+.corpus-cell {
+  min-width: 84px;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--panel);
+  text-align: right;
+}
+.corpus-num {
+  display: block;
+  font-family: var(--mono);
+  font-size: 17px;
+  color: var(--text);
+}
+.corpus-label {
+  display: block;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.corpus-label--warn {
+  color: var(--warn);
+}
+
+/* ── filter bar ──────────────────────────────────────────────────────────────── */
+.filters {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+}
+.filters label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.filters-search {
+  flex: 1 1 320px;
+  min-width: 240px;
+}
+.filters-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.filters input,
+.filters select {
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+  background: var(--panel-3);
+  color: var(--text);
+}
+.filters input:focus,
+.filters select:focus {
+  outline: none;
+  border-color: var(--info);
+}
+.filters-actions {
+  display: flex;
+  gap: 6px;
+}
+
+/* ── the table ───────────────────────────────────────────────────────────────── */
+.rows {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  gap: 8px;
+  padding-top: 16px;
+}
+.rows-head {
+  display: none; /* .card renders the title/badge absolutely; this is just an anchor */
+}
+.rows-scroll {
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--line-soft);
+  border-radius: 4px;
+}
+.rows-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+.rows-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--line);
+  padding: 7px 10px;
+  text-align: left;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 400;
+}
+.rows-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line-soft);
+  vertical-align: top;
+}
+.row:hover td {
+  background: var(--panel-2);
+}
+/* Gate-skipped windows are present but recessive: they are most of the corpus, and a
+   page where 78% of the rows shout is a page nobody reads. */
+.row--gated td {
+  color: var(--muted);
+}
+.col-time {
+  width: 168px;
+  white-space: nowrap;
+}
+.col-state {
+  width: 84px;
+}
+.col-source {
+  width: 250px;
+}
+.row-clock {
+  font-family: var(--mono);
+  color: var(--text);
+}
+.row--gated .row-clock {
+  color: var(--text-dim);
+}
+.row-date,
+.row-segment,
+.row-id {
+  font-family: var(--mono);
+  font-size: 10.5px;
+}
+.row-id {
+  cursor: pointer;
+  color: var(--muted);
+  word-break: break-all;
+}
+.row-id:hover {
+  color: var(--info);
+}
+.row-segment {
+  margin-top: 3px;
+  word-break: break-all;
+}
+
+.tag {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border-radius: 3px;
+  border: 1px solid var(--line);
+  color: var(--text-dim);
+  background: var(--panel-2);
+}
+.tag--live {
+  color: var(--ok);
+  border-color: rgba(88, 209, 160, 0.35);
+  background: rgba(88, 209, 160, 0.08);
+}
+.tag--rollup {
+  color: var(--hot);
+  border-color: rgba(217, 140, 208, 0.35);
+  background: rgba(217, 140, 208, 0.08);
+}
+.tag--gated {
+  color: var(--muted);
+}
+
+.caption {
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+.caption mark {
+  background: rgba(224, 168, 64, 0.22);
+  color: var(--warn);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+.caption-none {
+  font-style: italic;
+}
+.caption-more {
+  margin-left: 6px;
+  vertical-align: baseline;
+}
+.chip--quiet {
+  color: var(--muted);
+  background: transparent;
+}
+.col-source .chip--action {
+  display: inline-block;
+  text-decoration: none;
+  margin-bottom: 4px;
+}
+.rows-empty {
+  padding: 22px 12px;
+  text-align: center;
+}
+
+/* ── pager ───────────────────────────────────────────────────────────────────── */
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+.pager-state {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--text-dim);
+  min-width: 150px;
+  text-align: center;
+}
+.pager .btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+  border-color: var(--line-soft);
+}
+.pager .btn:disabled:hover {
+  border-color: var(--line-soft);
+}
+
+@media (max-width: 900px) {
+  .col-source {
+    width: 160px;
+  }
+  .corpus {
+    flex-wrap: wrap;
+  }
+}

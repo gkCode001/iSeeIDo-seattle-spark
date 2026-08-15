@@ -184,17 +184,14 @@ class NIMConfirmer:
 
     def _prompt(self, caption: str, task: Task) -> list[dict[str, str]]:
         return [
-            {
-                "role": "system",
-                "content": (
-                    "You decide whether a one-line description of a video moment matches "
-                    "a standing watch task. Answer with exactly one word: yes or no. "
-                    "Answer no if the description does not clearly show the task."
-                ),
-            },
+            {"role": "system", "content": self._s.confirm_prompt},
             {
                 "role": "user",
-                "content": f"Task: {task.describe}\nScene description: {caption}\nMatch?",
+                "content": (
+                    f"CONDITION: {task.describe}\n"
+                    f"SCENE: {caption}\n"
+                    f"Does the scene satisfy the condition?"
+                ),
             },
         ]
 

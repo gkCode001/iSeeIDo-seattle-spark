@@ -204,7 +204,7 @@ class TestConfigSubsetMatchesSettings(unittest.TestCase):
 class TestNoRemoteAssets(unittest.TestCase):
     """CLAUDE.md invariant 10. The demo is rehearsed and run with the network off."""
 
-    SHIPPED = ["index.html", "static", "mock"]
+    SHIPPED = ["index.html", "browse.html", "static", "mock"]
 
     def shipped_files(self):
         for entry in self.SHIPPED:
@@ -237,13 +237,23 @@ class TestNoRemoteAssets(unittest.TestCase):
                 self.fail(f"{path.relative_to(REPO_ROOT)}:{line}: {snippet}")
 
     def test_page_references_only_local_files(self):
-        html = (UI_DIR / "index.html").read_text(encoding="utf-8")
-        for ref in re.findall(r'(?:src|href)="([^"]+)"', html):
-            if ref.startswith("data:"):
-                continue
-            with self.subTest(ref=ref):
-                self.assertFalse(ref.startswith(("http:", "https:", "//")))
-                self.assertTrue((UI_DIR / ref).is_file(), f"{ref} is missing from ui/")
+        for page in ("index.html", "browse.html"):
+            html = (UI_DIR / page).read_text(encoding="utf-8")
+            for ref in re.findall(r'(?:src|href)="([^"]+)"', html):
+                if ref.startswith("data:"):
+                    continue
+                with self.subTest(page=page, ref=ref):
+                    self.assertFalse(ref.startswith(("http:", "https:", "//")))
+                    self.assertTrue((UI_DIR / ref).is_file(), f"{ref} is missing from ui/")
+
+    def test_the_two_pages_link_to_each_other(self):
+        """The index browser is only discoverable if the console points at it, and a
+        reader who lands on the browser needs a way back. A dead-end page is one nobody
+        finds at hour 39."""
+        console = (UI_DIR / "index.html").read_text(encoding="utf-8")
+        browser = (UI_DIR / "browse.html").read_text(encoding="utf-8")
+        self.assertIn('href="browse.html"', console)
+        self.assertIn('href="index.html"', browser)
 
 
 class TestTimeDiscipline(unittest.TestCase):

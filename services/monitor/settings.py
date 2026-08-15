@@ -39,6 +39,11 @@ _PENDING: dict[str, Any] = {
     # OpenAI-compatible chat route for the real thing. Kept configurable because NIM has
     # moved it between releases.
     "monitor.confirm_path": "/chat/completions",
+    "monitor.confirm_prompt": (
+        "Decide whether the SCENE satisfies the CONDITION. Wording will differ — "
+        "judge the meaning, not the words. A 'van' is a vehicle, a 'person' is "
+        "someone. Answer with one word: YES or NO."
+    ),
     "monitor.confirm_timeout_seconds": 30.0,
     # Stage 2's own budget. It answers one word; anything longer is the model ignoring
     # the instruction, not a better answer. CLAUDE.md invariant 6 in spirit: output
@@ -86,6 +91,7 @@ class MonitorSettings:
     confirm_model: str | None
     confirm_endpoint: str
     confirm_path: str
+    confirm_prompt: str
     confirm_timeout: float
     confirm_max_tokens: int
     stub_min_overlap: float
@@ -131,6 +137,7 @@ class MonitorSettings:
             ),
             confirm_endpoint=str(config.get("agent.endpoint")),
             confirm_path=str(_pending("monitor.confirm_path")),
+            confirm_prompt=str(_pending("monitor.confirm_prompt")),
             confirm_timeout=float(_pending("monitor.confirm_timeout_seconds")),
             confirm_max_tokens=int(_pending("monitor.confirm_max_tokens")),
             stub_min_overlap=float(_pending("monitor.stage2_stub_min_overlap")),

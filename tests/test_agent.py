@@ -845,6 +845,80 @@ class TestServer(AgentCase):
         self.assertEqual(starts, sorted(starts))
         self.assertEqual(body["chunks"][0]["segment"], SEGMENT)
 
+    # -- /api/index — the index browser (ui/browse.html) --------------------------------
+
+    def test_index_page_is_newest_first_with_a_total(self) -> None:
+        status, body = self.get("/api/index?limit=2")
+        self.assertEqual(status, 200)
+
+        self.assertEqual(len(body["chunks"]), 2)
+        # The total counts the corpus, not the page — without it there is no pager.
+        self.assertGreaterEqual(body["total"], len(CAPTIONS))
+        self.assertEqual(body["page"], 1)
+        self.assertEqual(body["pages"], -(-body["total"] // 2))
+        starts = [c["t_start"] for c in body["chunks"]]
+        self.assertEqual(starts, sorted(starts, reverse=True))
+
+    def test_index_pages_do_not_overlap(self) -> None:
+        first = self.get("/api/index?limit=2")[1]
+        second = self.get("/api/index?limit=2&offset=2")[1]
+
+        self.assertEqual(second["page"], 2)
+        ids = {c["chunk_id"] for c in first["chunks"]}
+        self.assertTrue(ids.isdisjoint({c["chunk_id"] for c in second["chunks"]}))
+
+    def test_index_search_is_a_substring_filter(self) -> None:
+        status, body = self.get("/api/index?q=hi-vis&limit=50")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["total"], 1)
+        self.assertIn("hi-vis", body["chunks"][0]["caption"])
+        self.assertEqual(body["filters"]["contains"], "hi-vis")
+
+    def test_index_reports_the_gate_skip_rate(self) -> None:
+        """SPEC §2.3 — the browser is where "why is the corpus this size?" gets asked."""
+        stats = self.get("/api/index?limit=1")[1]["stats"]
+        for key in ("total", "captioned", "gated", "skip_rate", "gate_health"):
+            self.assertIn(key, stats)
+        self.assertEqual(stats["total"], stats["captioned"] + stats["gated"])
+
+    def test_index_rows_carry_the_locator_tuple(self) -> None:
+        """Invariant 2 — every row must still be findable in the footage."""
+        row = self.get("/api/index?limit=1")[1]["chunks"][0]
+        for key in ("t_start", "t_end", "segment", "pts_offset", "chunk_id", "tier", "gated"):
+            self.assertIn(key, row)
+        self.assertTrue(row["t_start"].endswith("Z"))
+        self.assertTrue(row["t_end"].endswith("Z"))
+
+    def test_index_limit_is_capped_not_obeyed_blindly(self) -> None:
+        body = self.get("/api/index?limit=99999")[1]
+        self.assertEqual(body["limit"], self.settings.browse_max_page_size)
+
+    def test_index_survives_a_hand_edited_url(self) -> None:
+        """These come off a URL bar. Garbage should page, not 500."""
+        body = self.get("/api/index?limit=banana&offset=-4")[1]
+        self.assertEqual(body["limit"], self.settings.browse_page_size)
+        self.assertEqual(body["offset"], 0)
+
+        past_the_end = self.get("/api/index?limit=5&offset=100000")[1]
+        self.assertEqual(past_the_end["chunks"], [])
+        # No page rather than "page 20001 of 3" — see the route's docstring.
+        self.assertEqual(past_the_end["page"], 0)
+
+    def test_index_rejects_an_unknown_tier(self) -> None:
+        try:
+            self.get("/api/index?tier=nonsense")
+            self.fail("an unknown tier should not be silently ignored")
+        except urllib.error.HTTPError as exc:
+            self.assertEqual(exc.code, 400)
+
+    def test_index_time_range_narrows_the_corpus(self) -> None:
+        t_from = to_iso(SEGMENT_START - timedelta(minutes=1))
+        t_to = to_iso(SEGMENT_START + timedelta(minutes=1))
+        body = self.get(f"/api/index?limit=50&t_from={t_from}&t_to={t_to}&gated=false")[1]
+
+        self.assertEqual(body["total"], len(CAPTIONS))
+        self.assertEqual(body["filters"]["t_from"], t_from)
+
     def test_ask_grounded(self) -> None:
         status, body = self.post("/api/ask", {"question": GROUNDED_QUESTION})
         self.assertEqual(status, 200)

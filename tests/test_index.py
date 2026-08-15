@@ -692,6 +692,121 @@ class TestPersistence(unittest.TestCase):
                 self.assertEqual(top.record.pts_offset, EVENT_PTS)
 
 
+class TestBrowse(unittest.TestCase):
+    """Listing the index — what the /api/index browser pages through.
+
+    Different guarantees from :meth:`search`, and the difference is the point: wall-clock
+    order rather than relevance, gated rows included rather than filtered out, and a
+    total so a caller can paginate at all.
+    """
+
+    def setUp(self) -> None:
+        self.store = make_store()
+        self.store.insert(corpus())
+        self.store.insert(gated_chunks(3))
+        self.total = len(corpus()) + 3
+
+    def test_lists_captioned_and_gated_together(self) -> None:
+        """A browser that hides the skipped windows shows a corpus 4× too small."""
+        page = self.store.browse(limit=100)
+
+        self.assertEqual(page.total, self.total)
+        self.assertEqual(len(page.records), self.total)
+        self.assertEqual(sum(1 for r in page.records if r.gated), 3)
+
+    def test_newest_first_by_default(self) -> None:
+        page = self.store.browse(limit=100)
+        starts = [r.t_start for r in page.records]
+        self.assertEqual(starts, sorted(starts, reverse=True))
+
+    def test_oldest_first_is_the_exact_reverse(self) -> None:
+        newest = self.store.browse(limit=100)
+        oldest = self.store.browse(limit=100, newest_first=False)
+        self.assertEqual(
+            [r.chunk_id for r in newest.records],
+            list(reversed([r.chunk_id for r in oldest.records])),
+        )
+
+    def test_pages_tile_the_corpus_without_gaps_or_repeats(self) -> None:
+        """The property that makes pagination trustworthy: page 2 starts where 1 ended."""
+        seen: list[str] = []
+        for offset in range(0, self.total, 3):
+            page = self.store.browse(offset=offset, limit=3)
+            self.assertEqual(page.total, self.total)
+            seen.extend(r.chunk_id for r in page.records)
+
+        self.assertEqual(len(seen), self.total)
+        self.assertEqual(len(set(seen)), self.total)
+        self.assertEqual(seen, [r.chunk_id for r in self.store.browse(limit=100).records])
+
+    def test_offset_past_the_end_is_an_empty_page_not_an_error(self) -> None:
+        page = self.store.browse(offset=10_000, limit=10)
+        self.assertEqual(page.records, [])
+        self.assertEqual(page.total, self.total)
+
+    def test_negative_offset_is_clamped(self) -> None:
+        self.assertEqual(self.store.browse(offset=-5, limit=2).offset, 0)
+
+    def test_total_counts_the_match_set_not_the_page(self) -> None:
+        page = self.store.browse(limit=2)
+        self.assertEqual(len(page.records), 2)
+        self.assertEqual(page.total, self.total)
+
+    def test_gated_filter_selects_one_side_of_the_split(self) -> None:
+        captioned = self.store.browse(limit=100, gated=False)
+        skipped = self.store.browse(limit=100, gated=True)
+
+        self.assertEqual(captioned.total, len(corpus()))
+        self.assertEqual(skipped.total, 3)
+        self.assertTrue(all(not r.gated for r in captioned.records))
+        self.assertTrue(all(r.gated for r in skipped.records))
+        self.assertTrue(all(r.caption == "" for r in skipped.records))
+
+    def test_contains_is_a_case_insensitive_substring(self) -> None:
+        page = self.store.browse(limit=100, contains="WHITE PANEL VAN")
+        self.assertEqual([r.caption for r in page.records], [EVENT_CAPTION])
+        self.assertEqual(page.total, 1)
+
+    def test_contains_matching_nothing_is_an_empty_page(self) -> None:
+        page = self.store.browse(limit=100, contains="helicopter")
+        self.assertEqual(page.records, [])
+        self.assertEqual(page.total, 0)
+
+    def test_time_range_filters_on_overlap(self) -> None:
+        """Invariant 3's rule again: a window straddling the boundary is in range."""
+        # A one-second range strictly inside the event window. Containment would drop it.
+        inside_start = EVENT_START + timedelta(seconds=2)
+        page = self.store.browse(
+            limit=100, t_from=inside_start, t_to=inside_start + timedelta(seconds=1)
+        )
+        self.assertIn(EVENT_CAPTION, [r.caption for r in page.records])
+
+    def test_records_carry_the_full_locator_tuple(self) -> None:
+        """Invariant 2 — a row without segment + pts_offset cannot be re-watched."""
+        page = self.store.browse(limit=100, contains="white panel van")
+        record = page.records[0]
+        self.assertEqual(record.t_start, EVENT_START)
+        self.assertEqual(record.t_end, EVENT_END)
+        self.assertEqual(record.segment, SEGMENT)
+        self.assertEqual(record.pts_offset, EVENT_PTS)
+
+    def test_vectors_are_not_shipped(self) -> None:
+        """3 KB of floats per row, for a page nobody reads them on."""
+        page = self.store.browse(limit=100, gated=False)
+        self.assertTrue(all(r.embedding == [] for r in page.records))
+
+    def test_tier_filter(self) -> None:
+        self.store.insert([_chunk(200.0, "A merged minute of the bay.", tier=Tier.ROLLUP)])
+        live = self.store.browse(limit=100, tier=Tier.LIVE)
+        rollup = self.store.browse(limit=100, tier=Tier.ROLLUP)
+
+        self.assertEqual(rollup.total, 1)
+        self.assertEqual(live.total, self.total)
+        # Unfiltered means every tier: a reader should see that the rollup row exists,
+        # rather than have it hidden by index.rollup.enabled, a dial they cannot see.
+        self.assertEqual(self.store.browse(limit=100).total, self.total + 1)
+
+
 class TestSettings(unittest.TestCase):
     def test_reads_the_real_settings_file(self) -> None:
         settings = IndexSettings.from_config()

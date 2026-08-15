@@ -82,6 +82,11 @@ class AgentApp:
     hub: WebSocketHub
     settings: AgentSettings
     clip_cutter: ClipCutter
+    #: M5, running in this process. SPEC §1 draws it as its own module, which it is —
+    #: but as a separate PROCESS it would need its own copy of the task registry, and a
+    #: task registered through this server would never reach it. Sharing the registry is
+    #: what makes "create a task, then have it fire" true.
+    monitor: Any | None = None
 
     # -- lifecycle --------------------------------------------------------------------
 
@@ -106,8 +111,12 @@ class AgentApp:
                 )
             )
         self.jobs.start()
+        if self.monitor is not None:
+            self.monitor.start()
 
     def stop(self) -> None:
+        if self.monitor is not None:
+            self.monitor.stop()
         self.jobs.stop()
         self.hub.close_all()
 
@@ -148,9 +157,11 @@ class AgentApp:
 
         Listing is done through the public search API with a wide ``ann_k``/``top_n`` and
         an empty query: with no query terms every candidate scores alike, so the filter
-        that survives is the time range — which is the one we want. Reaching past
-        ``IndexStore`` into a backend to add a ``list()`` would couple M3 to M2's
-        internals for a convenience the UI needs once per paint.
+        that survives is the time range — which is the one we want.
+
+        That trick is enough for a strip and not enough for a browser, which needs a
+        total to paginate against and the gated rows the search path drops. See
+        :meth:`get_index` / ``IndexStore.browse`` for that.
         """
         t_to = t_to or utcnow()
         t_from = t_from or t_to - timedelta(seconds=self.settings.chunks_lookback_seconds)
@@ -222,9 +233,11 @@ class AgentApp:
             "total": page.total,
             "offset": page.offset,
             "limit": page_size,
-            # 1-based, for a reader. Zero pages when nothing matched, so "page 1 of 0"
-            # never appears next to an empty list.
-            "page": (offset // page_size) + 1 if page.total else 0,
+            # 1-based, for a reader. Zero when this page holds nothing — an offset past
+            # the end is a hand-edited URL, and "page 50000 of 273" is a worse answer
+            # than "no page". The offset itself is echoed back unchanged: silently
+            # serving a different page than the one asked for is the other bad answer.
+            "page": (offset // page_size) + 1 if page.records else 0,
             "pages": pages,
             "filters": {
                 "t_from": to_iso(t_from) if t_from else None,
@@ -886,17 +899,54 @@ def build_app(
     chat_log = ChatLog(resolved.chat_log)
     toolbox = Toolbox(store, action_server, registry, resolved)
     agent = AskAgent(build_backend(resolved), toolbox, chat_log, resolved)
-    return AgentApp(
+
+    task_registry = tasks
+    monitor_runner = None
+    if task_registry is None:
+        task_registry, monitor_runner = _build_monitor(action_server)
+    if task_registry is None:  # M5 unavailable — the pane still renders from the seed
+        task_registry = SeedTaskRegistry(actions=action_server)
+
+    app = AgentApp(
         agent=agent,
         index=store,
         actions=action_server,
         jobs=registry,
         chat_log=chat_log,
-        tasks=tasks if tasks is not None else SeedTaskRegistry(actions=action_server),
+        tasks=task_registry,
         hub=WebSocketHub(),
         settings=resolved,
         clip_cutter=clip_cutter if clip_cutter is not None else _default_cutter(),
+        monitor=monitor_runner,
     )
+    if monitor_runner is not None:
+        # Push funnel state and each new action to the panes as they happen, over the
+        # WebSocket that already exists for §4.3's refinements.
+        monitor_runner._on_state = app.publish_monitor_state  # noqa: SLF001 - same module
+        monitor_runner._on_action = app.publish_action  # noqa: SLF001
+    return app
+
+
+def _build_monitor(actions: ActionServer) -> tuple[TaskRegistry | None, Any | None]:
+    """M5 in this process: the real funnel, the real task registry, the real brakes.
+
+    Returns ``(None, None)`` and logs why if M5 cannot be built. The ask surface is the
+    demo's other half and must come up regardless — a Watch pane that renders a seed is
+    a smaller failure than a server that will not start.
+    """
+    try:
+        from services.monitor import build_monitor  # noqa: PLC0415 - optional at runtime
+        from services.monitor.runner import IndexTail, MonitorRunner
+        from services.monitor.verify import WorkerVerifier
+
+        monitor = build_monitor(actions=actions, verifier=WorkerVerifier())
+        tail = IndexTail(str(config.repo_path("index.store.memory_path")))
+        runner = MonitorRunner(monitor, tail)
+        log_event("agent.monitor.wired", tasks=len(monitor.tasks()))
+        return monitor.registry_adapter(), runner
+    except Exception as exc:  # noqa: BLE001 - M5 is optional; the ask surface is not
+        log_event("agent.monitor.unavailable", error=f"{type(exc).__name__}: {exc}")
+        return None, None
 
 
 def _default_analyzer(settings: AgentSettings) -> Any:

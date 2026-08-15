@@ -387,6 +387,16 @@ monitor:
   # Stage 2 — LLM confirm. Deliberately reads `agent.backend` rather than a key of its
   # own, so M3 and M5 can never end up talking to different models.
   confirm_path: /chat/completions   # NIM has moved this route between releases
+  # Stage 2's prompt. Measured against three captions — a match, an empty scene and an
+  # unrelated one — because a prompt that only ever says "yes" is worse than no stage 2
+  # at all. The earlier wording ("Answer no if the description does not clearly show the
+  # task") answered NO to a caption that literally restated the task, so nothing could
+  # ever promote. Telling the model to judge MEANING and giving it one worked example of
+  # a synonym is what fixed it.
+  confirm_prompt: >-
+    Decide whether the SCENE satisfies the CONDITION. Wording will differ — judge the
+    meaning, not the words. A 'van' is a vehicle, a 'person' is someone.
+    Answer with one word: YES or NO.
   confirm_timeout_seconds: 30.0
   confirm_max_tokens: 8             # stage 2 answers one word — invariant 6 in spirit
   stage2_stub_min_overlap: 0.5      # StubConfirmer only; no effect on the real path

@@ -697,7 +697,7 @@ class MilvusBackend:
             clauses.append(f'payload["caption"] like "%{escaped}%"')
         # An always-true clause: pymilvus rejects an empty expression, and "no filters"
         # is the default page the browser opens on.
-        return " and ".join(clauses) if clauses else "chunk_id != \"\""
+        return " and ".join(clauses) if clauses else 'chunk_id != ""'
 
     def _browse_partitions(self, gated: bool | None) -> list[str]:
         """Read both partitions unless the caller asked for one side of the split."""

@@ -135,7 +135,9 @@ class AgentSettings:
             chunks_lookback_seconds=float(_pending("agent.chunks.lookback_seconds")),  # type: ignore[arg-type]
             chunks_max=int(_pending("agent.chunks.max")),  # type: ignore[arg-type]
             browse_page_size=int(_pending("agent.browse.page_size")),  # type: ignore[arg-type]
-            browse_max_page_size=int(_pending("agent.browse.max_page_size")),  # type: ignore[arg-type]
+            browse_max_page_size=int(
+                _pending("agent.browse.max_page_size")  # type: ignore[arg-type]
+            ),
             browse_caption_preview_chars=int(
                 _pending("agent.browse.caption_preview_chars")  # type: ignore[arg-type]
             ),

@@ -621,6 +621,17 @@ class Monitor:
     # The Watch pane — SPEC §11.3. M3 owns the HTTP route; this is the payload.
     # ----------------------------------------------------------------------------------
 
+    def registry_adapter(self) -> "_MonitorRegistry":
+        """A ``TaskRegistry`` for M3, backed by THIS funnel.
+
+        M3 and M5 share one task registry because they must: a task registered through
+        the server has to be the same object the funnel evaluates, or the Watch pane
+        offers a form that creates tasks nothing will ever match. This is the adapter
+        that lets the server talk to M5's registry in the vocabulary its routes already
+        use, without M3 importing M5's internals.
+        """
+        return _MonitorRegistry(self)
+
     def state(self) -> MonitorState:
         """Per-task funnel state, shaped per ``ui/mock/monitor_state.json``.
 
@@ -730,3 +741,35 @@ def build_monitor(
         verifier=verifier,
         clock=clock,
     )
+
+
+class _MonitorRegistry:
+    """``TaskRegistry`` over a live :class:`Monitor` — see ``Monitor.registry_adapter``.
+
+    Every write goes to the funnel's own registry, so registering, editing or deleting a
+    task through the UI takes effect on the very next chunk. ``monitor_state`` returns
+    the real funnel state rather than the idle placeholder M3 falls back to when M5 is
+    not running.
+    """
+
+    def __init__(self, monitor: "Monitor") -> None:
+        self._monitor = monitor
+
+    @property
+    def _registry(self) -> TaskRegistry:
+        return self._monitor.registry
+
+    def tasks(self) -> list[Task]:
+        return self._registry.tasks()
+
+    def register(self, task: Task) -> Task:
+        return self._monitor.register_task(task)
+
+    def remove(self, task_id: str) -> Task:
+        return self._registry.remove(task_id)
+
+    def update(self, task_id: str, changes: Mapping[str, Any]) -> Task:
+        return self._registry.update(task_id, changes)
+
+    def monitor_state(self) -> dict[str, Any]:
+        return self._monitor.state().to_dict()

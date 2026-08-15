@@ -28,6 +28,7 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import Any, Protocol
 
+from shared.queue import Priority
 from shared.schema import DeepJob, JobState
 
 __all__ = [
@@ -112,60 +113,65 @@ class NullVerifier:
 
 
 class WorkerVerifier:
-    """Adapter onto M4, resolved lazily so M5 does not depend on its file existing.
+    """Adapter onto M4 (SPEC §5), resolved lazily so importing M5 never needs M4's file.
 
-    Accepts either a module or any object exposing the SPEC §5 surface. Resolution is
-    duck-typed against a small set of names because M4 is in flight; the failure, if it
-    comes, is a single readable error naming SPEC §5 rather than an AttributeError three
-    frames down inside the chunk loop.
+    **Binds to a worker OBJECT, not to the module.** The earlier version duck-typed a
+    list of plausible names against ``services.worker`` and happened to find a
+    module-level ``submit`` but no ``poll`` — those live on ``DeepWorker``. The result
+    was a verifier that submitted jobs and could never collect a verdict: alerts stayed
+    UNVERIFIED for ever, the stage-3 spinner never resolved, and retraction — the point
+    of stage 3 — could not happen. Nothing errored, so nothing said so.
+
+    So the contract is now explicit and checked once, at bind time: whatever is injected
+    must expose ``submit`` and ``poll``. ``services.worker.default_worker()`` does.
     """
-
-    _SUBMIT_NAMES = ("submit", "submit_deep_analyze", "submit_job")
-    _POLL_NAMES = ("poll", "job", "get_job", "job_status")
 
     def __init__(self, worker: Any | None = None, *, module: str = "services.worker") -> None:
         self._worker = worker
         self._module = module
-        self._submit: Callable[..., DeepJob] | None = None
-        self._poll: Callable[[str], DeepJob | None] | None = None
+        self._bound = False
 
     def _resolve(self) -> Any:
+        """The worker object. A module is accepted and asked for its default worker."""
         if self._worker is None:
-            import importlib  # noqa: PLC0415 - deferred; M4 may not exist yet
+            import importlib  # noqa: PLC0415 - deferred; M4 is imported only when used
 
-            self._worker = importlib.import_module(self._module)
+            module = importlib.import_module(self._module)
+            factory = getattr(module, "default_worker", None)
+            if not callable(factory):
+                raise RuntimeError(
+                    f"{self._module} exposes no default_worker(); SPEC §5 requires a "
+                    f"worker object with submit(...) and poll(...)."
+                )
+            self._worker = factory()
         return self._worker
 
     def _bind(self) -> None:
-        if self._submit is not None:
+        if self._bound:
             return
         target = self._resolve()
-        for name in self._SUBMIT_NAMES:
-            fn = getattr(target, name, None)
-            if callable(fn):
-                self._submit = fn
-                break
-        if self._submit is None:
+        missing = [name for name in ("submit", "poll") if not callable(getattr(target, name, None))]
+        if missing:
             raise RuntimeError(
-                f"{self._module} exposes no non-blocking submit; SPEC §5 requires "
-                f"deep_analyze(t_start, t_end, question) -> DeepJob plus a submit(...) "
-                f"that returns immediately. Tried: {', '.join(self._SUBMIT_NAMES)}"
+                f"{type(target).__name__} is missing {', '.join(missing)}; SPEC §5 "
+                f"requires submit(t_start, t_end, question) -> DeepJob and poll(job) -> "
+                f"DeepJob. Stage 3 cannot verify without both — an alert that can never "
+                f"be verified can never be retracted either."
             )
-        for name in self._POLL_NAMES:
-            fn = getattr(target, name, None)
-            if callable(fn):
-                self._poll = fn
-                break
+        self._bound = True
 
     def submit(self, t_start: datetime, t_end: datetime, question: str) -> DeepJob:
         self._bind()
-        assert self._submit is not None  # noqa: S101 - _bind raises otherwise
-        return self._submit(t_start, t_end, question)
+        # VERIFICATION priority, not INTERACTIVE: a user waiting on an ask outranks a
+        # background re-watch (SPEC §7).
+        return self._resolve().submit(
+            t_start, t_end, question, priority=Priority.VERIFICATION
+        )
 
     def poll(self, job_id: str) -> DeepJob | None:
         self._bind()
-        if self._poll is None:
-            # A worker that only pushes results is fine; the funnel also accepts a job
-            # handed to it directly. Polling simply has nothing to say.
+        try:
+            return self._resolve().poll(job_id)
+        except KeyError:
+            # A job this worker never heard of — a restart, or somebody else's id.
             return None
-        return self._poll(job_id)

@@ -108,6 +108,12 @@ fetches it only if it is not already on disk (it checks your HF cache first).
 Then open **<http://127.0.0.1:8080/?mode=live>** — the `?mode=live` matters, the page
 defaults to mock fixtures.
 
+**<http://127.0.0.1:8080/browse.html?mode=live>** is the index browser: every analysis
+window the system has written, newest first, paged — the corpus an Ask answer is drawn
+from. Gate-skipped windows are listed too (captionless rows), because they are ~78% of it.
+Filter by caption substring, tier, time range; `←`/`→` page. There is a link to it in the
+console's top bar.
+
 `start.sh` runs a preflight (reporting *every* missing prerequisite at once, with the fix
 for each), downloads the model if needed, then starts **model server → recorder → ingest
 → agent**, waiting for each to actually answer before starting the next. Re-running it is
@@ -339,7 +345,8 @@ config/tasks.yaml        standing tasks for M5 (SPEC §6.1)
 shared/                  schema, timecode, the one VLM client, the priority queue
 services/                recorder, ingest (M1), index (M2), agent (M3), worker (M4),
                          monitor (M5), mcp (the action server)
-ui/                      single page, three panes. Vendored assets, no CDN.
+ui/                      console (index.html: three panes + players) and the index
+                         browser (browse.html). Vendored assets, no CDN.
 scripts/doctor.py        `make doctor`
 tests/                   290 stdlib unittest tests
 docker-compose.yml       the container topology — never run, see above
