@@ -130,6 +130,11 @@ class IngestSettings:
     overlay_max_fontsize: int
     vlm_backend: str
     caption_prompt: str
+    watchlist_enabled: bool
+    watchlist_path: Path
+    watchlist_seed_path: Path
+    watchlist_preamble: str
+    watchlist_max_items: int
     caption_timeout_seconds: float
     poll_interval_seconds: float
     bench_target_seconds: float
@@ -197,6 +202,11 @@ class IngestSettings:
             overlay_max_fontsize=int(setting("ingest.overlay.max_fontsize")),
             vlm_backend=str(config.get("vlm.backend")),
             caption_prompt=str(config.get("vlm.prompts.caption")).strip(),
+            watchlist_enabled=bool(setting("ingest.watchlist.enabled")),
+            watchlist_path=config.repo_path("ingest.watchlist.path"),
+            watchlist_seed_path=config.repo_path("monitor.tasks_file"),
+            watchlist_preamble=str(setting("vlm.prompts.watchlist_preamble") or "").strip(),
+            watchlist_max_items=int(setting("ingest.watchlist.max_items")),
             caption_timeout_seconds=float(caption_timeout),
             poll_interval_seconds=float(setting("ingest.poll_interval_seconds")),
             bench_target_seconds=float(setting("ingest.bench.target_caption_seconds")),
@@ -255,4 +265,18 @@ class IngestSettings:
             raise IngestError(
                 "vlm.prompts.caption is empty; an empty prompt produces an empty caption "
                 "and an index full of nothing."
+            )
+        if self.watchlist_enabled and not self.watchlist_preamble:
+            # Silently degrading here is the bad outcome: captions stay general, standing
+            # tasks keep missing details, and nothing in the logs says why.
+            raise IngestError(
+                "ingest.watchlist.enabled is true but vlm.prompts.watchlist_preamble is "
+                "empty, so no task checklist would reach the captioner and standing tasks "
+                "would silently go back to matching on whatever the caption happened to "
+                "mention. Set the preamble or set ingest.watchlist.enabled: false."
+            )
+        if self.watchlist_enabled and self.watchlist_max_items <= 0:
+            raise IngestError(
+                f"ingest.watchlist.max_items must be positive when the watchlist is on, "
+                f"got {self.watchlist_max_items}"
             )

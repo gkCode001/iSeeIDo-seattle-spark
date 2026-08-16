@@ -35,6 +35,8 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Protocol, runtime_checkable
 
+from shared import lmstudio
+from shared.lmstudio import merge_payload
 from shared.schema import to_iso
 
 from .settings import AgentSettings
@@ -51,7 +53,12 @@ __all__ = [
     "RequestsTransport",
     "StubBackend",
     "OpenAICompatBackend",
+    "ModelSource",
+    "DEFAULT_SOURCE",
     "build_backend",
+    "build_lmstudio_backend",
+    "build_source_backend",
+    "describe_sources",
     "LLMError",
     "LLMTransportError",
     "LLMResponseError",
@@ -229,21 +236,36 @@ class OpenAICompatBackend:
         transport: Transport | None = None,
         *,
         model: str | None = None,
+        endpoint: str | None = None,
+        name: str = "nim",
+        extra_payload: Mapping[str, Any] | None = None,
     ) -> None:
         self._s = settings
         self._transport: Transport = transport if transport is not None else RequestsTransport()
-        self._url = settings.endpoint.rstrip("/") + _CHAT_COMPLETIONS
+        # ``endpoint`` and ``name`` are overridable for exactly one reason: the console's
+        # model selector points this same class at LM Studio's server instead of ours.
+        # Same wire protocol, different host and a different model id, so a second class
+        # would be the same code with the constants moved.
+        self._url = (endpoint or settings.endpoint).rstrip("/") + _CHAT_COMPLETIONS
         # SPEC §10 D3. ``require`` (via AgentSettings.model) turns "model is null" into a
         # sentence naming the open decision instead of a 404.
         self._model = str(model) if model is not None else settings.model
+        self._name = name
+        # Request-body fields merged into every call. Carries the reasoning-off switch on
+        # the LM Studio path, where it cannot be a launch flag — see shared/lmstudio.py.
+        self._extra: dict[str, Any] = dict(extra_payload or {})
 
     @property
     def name(self) -> str:
-        return "nim"
+        return self._name
 
     @property
     def model(self) -> str:
         return self._model
+
+    @property
+    def endpoint(self) -> str:
+        return self._url[: -len(_CHAT_COMPLETIONS)]
 
     def complete(self, request: LLMRequest) -> LLMResponse:
         payload: dict[str, Any] = {
@@ -258,8 +280,17 @@ class OpenAICompatBackend:
         if request.tools:
             payload["tools"] = [dict(t) for t in request.tools]
             payload["tool_choice"] = "auto"
+        # Two layers, and both are load-bearing. `agent.extra_body` carries the switch
+        # the CONFIGURED model needs — on Nemotron 3.5 Lightning that is
+        # chat_template_kwargs.enable_thinking=false, without which it writes its
+        # reasoning into `content` and the groundedness gate's first-line parse breaks.
+        # `_extra` is what the selector attaches to whichever model it just pointed us
+        # at, so it goes second and wins. merge_payload rather than update() because
+        # both write chat_template_kwargs and a dict assignment would drop one of them.
         if self._s.extra_body:
-            payload.update(self._s.extra_body)
+            merge_payload(payload, self._s.extra_body)
+        if self._extra:
+            merge_payload(payload, self._extra)
 
         started = time.perf_counter()
         try:
@@ -362,6 +393,16 @@ _INLINE_ARG_RE = re.compile(
     rf"(?P<key>[a-z_][a-z0-9_]*)\s*:\s*{_DELIM}(?P<value>.*?){_DELIM}", re.S | re.I
 )
 
+#: The other shape the same model reaches for: `name(key="value", key2="value2")`. Two
+#: spellings of the same mistake — the call belongs in `tool_calls` and arrives as prose
+#: either way — so both are normalised rather than one being treated as the real one.
+_PAREN_CALL_RE = re.compile(
+    r"(?P<name>[a-z_][a-z0-9_]*)\s*\((?P<body>[^()]*)\)\s*\.?\s*$", re.S | re.I
+)
+_PAREN_ARG_RE = re.compile(
+    r"(?P<key>[a-z_][a-z0-9_]*)\s*=\s*[\"\'](?P<value>[^\"\']*)[\"\']", re.S
+)
+
 
 def _extract_inline_tool_call(content: str) -> tuple[list[ToolCall], str]:
     """Pull a tool call out of message *content*, returning it and the leftover prose.
@@ -380,12 +421,23 @@ def _extract_inline_tool_call(content: str) -> tuple[list[ToolCall], str]:
     while the deep job runs.
     """
     text = content.strip()
-    if not text or "<|" not in text:
+    if not text:
         return [], content
-    match = _INLINE_CALL_RE.search(text)
-    if not match:
-        return [], content
-    arguments = {m.group("key"): m.group("value").strip() for m in _INLINE_ARG_RE.finditer(match.group("body"))}
+
+    match = _INLINE_CALL_RE.search(text) if "<|" in text else None
+    if match is not None:
+        arguments = {
+            m.group("key"): m.group("value").strip()
+            for m in _INLINE_ARG_RE.finditer(match.group("body"))
+        }
+    else:
+        match = _PAREN_CALL_RE.search(text)
+        if match is None:
+            return [], content
+        arguments = {
+            m.group("key"): m.group("value").strip()
+            for m in _PAREN_ARG_RE.finditer(match.group("body"))
+        }
     if not arguments:
         return [], content
     call = ToolCall(name=match.group("name"), arguments=arguments)
@@ -670,4 +722,141 @@ def build_backend(
         return StubBackend(settings)
     if backend == "nim":
         return OpenAICompatBackend(settings, transport)
+    if backend == lmstudio.BACKEND:
+        return build_lmstudio_backend(settings, transport)
     raise ValueError(f"unknown agent.backend: {settings.backend!r}")
+
+
+# --------------------------------------------------------------------------------------
+# Model sources — the two options behind the console's topbar selector
+# --------------------------------------------------------------------------------------
+#
+# A "source" is a named way of reaching a model, not a second implementation: both end up
+# in OpenAICompatBackend. The list exists because the UI needs to *offer* the choice, and
+# offering it means knowing each option's label, its model id and whether it can be
+# reached — before the user picks one.
+
+#: ``agent.model_source`` when nothing else is set. The llama-server `make serve` starts.
+DEFAULT_SOURCE = "default"
+
+
+@dataclass(frozen=True)
+class ModelSource:
+    """One selectable model source, as the console renders it."""
+
+    id: str
+    label: str
+    model: str
+    detail: str
+    available: bool
+    note: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "label": self.label,
+            "model": self.model,
+            "detail": self.detail,
+            "available": self.available,
+            "note": self.note,
+        }
+
+
+def build_lmstudio_backend(
+    settings: AgentSettings,
+    transport: Transport | None = None,
+    *,
+    fetch: lmstudio.Fetch | None = None,
+) -> LLMBackend:
+    """Point the ask surface at whatever LM Studio currently has loaded.
+
+    The model id is *resolved*, not configured: asking the server what it is serving is
+    the whole reason this option exists. Resolution happens here, at construction, so a
+    switch fails immediately with a sentence rather than at the user's next question.
+    """
+    ls = lmstudio.LMStudioSettings.from_config()
+    loaded = lmstudio.resolve(ls, fetch=fetch)
+    return OpenAICompatBackend(
+        settings,
+        transport,
+        model=loaded.id,
+        endpoint=ls.endpoint,
+        name=lmstudio.BACKEND,
+        extra_payload=ls.reasoning_off_payload,
+    )
+
+
+def build_source_backend(
+    source: str,
+    settings: AgentSettings,
+    transport: Transport | None = None,
+    *,
+    fetch: lmstudio.Fetch | None = None,
+) -> LLMBackend:
+    """Build the backend for a selector option. Raises ``ValueError`` on an unknown id."""
+    if source == DEFAULT_SOURCE:
+        return build_backend(settings, transport)
+    if source == lmstudio.BACKEND:
+        return build_lmstudio_backend(settings, transport, fetch=fetch)
+    raise ValueError(f"unknown model source: {source!r}")
+
+
+def describe_sources(
+    settings: AgentSettings, *, fetch: lmstudio.Fetch | None = None
+) -> list[ModelSource]:
+    """Both options with their current reachability, for ``GET /api/model``.
+
+    Neither probe raises. An option that only turns out to be dead *after* you select it
+    is worse than one greyed out with the reason printed beside it.
+    """
+    default = ModelSource(
+        id=DEFAULT_SOURCE,
+        label=_default_label(settings),
+        model=_default_model(settings),
+        detail=f"{settings.backend} · {settings.endpoint}",
+        available=True,
+        note=(
+            ""
+            if settings.backend.lower() != "stub"
+            else "agent.backend is `stub` — deterministic answers, no model is being called"
+        ),
+    )
+
+    ls_probe = lmstudio.probe(fetch=fetch)
+    lm = ModelSource(
+        id=lmstudio.BACKEND,
+        label="LM Studio",
+        model=ls_probe.model or "—",
+        detail=ls_probe.detail or "not reachable",
+        available=ls_probe.available,
+        note=(
+            ""
+            if not ls_probe.available
+            else "LM Studio and `make serve` both hold their weights in the same 128 GB — "
+            "run one, not both (invariant 1)"
+        ),
+    )
+    return [default, lm]
+
+
+def _default_label(settings: AgentSettings) -> str:
+    """The configured model's own name, minus the quant/extension noise in the filename."""
+    if settings.backend.lower() == "stub":
+        return "stub (no model)"
+    try:
+        name = settings.model
+    except Exception:  # noqa: BLE001 - agent.model unset is SPEC §10 D3, not a crash
+        return "default"
+    stem = name.rsplit("/", 1)[-1]
+    for suffix in (".gguf", ".safetensors"):
+        stem = stem.removesuffix(suffix)
+    return stem.split("-UD-")[0] or stem
+
+
+def _default_model(settings: AgentSettings) -> str:
+    if settings.backend.lower() == "stub":
+        return "stub"
+    try:
+        return settings.model
+    except Exception:  # noqa: BLE001
+        return "—"

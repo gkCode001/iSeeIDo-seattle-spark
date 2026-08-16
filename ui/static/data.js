@@ -46,7 +46,10 @@ SPARK.data = (function () {
     task: "/api/tasks/", //                       DELETE /<id>, PATCH /<id> -> Task
     monitorState: "/api/monitor/state", //        GET  -> funnel state, shape per ui/mock/monitor_state.json
     actions: "/api/actions", //                   GET  ?t_from&t_to -> {entries: [ActionLogEntry]}
+    retention: "/api/retention", //               GET  -> the plan; POST {confirm} -> deletes it
     video: "/api/video", //                       GET  ?t_from&t_to -> stitched stream (NEVER ?file=)
+    model: "/api/model", //                       GET  -> {active, model, sources: [ModelSource]}
+    //                                                 POST {source} -> the same, switched
   };
 
   var MOCK_BASE = "mock/";
@@ -109,6 +112,58 @@ SPARK.data = (function () {
   function patchTask(taskId, changes) {
     if (isMock()) return Promise.resolve(changes);
     return sendJSON("PATCH", ENDPOINTS.task + encodeURIComponent(taskId), changes);
+  }
+
+  // ---------------------------------------------------------------------------------
+  // Retention — the only destructive call this UI can make.
+  //
+  // Two functions, never one, because the plan is what makes the button honest: the page
+  // shows the file count, the caption count and the bytes BEFORE anything is unlinked.
+  // Both refuse outright in mock mode. There is no archive behind the fixtures, so a
+  // scripted "deleted 42 files" would be a lie about a destructive action — the one
+  // category of mock this page must not have.
+  // ---------------------------------------------------------------------------------
+  function retentionPlan(olderThanSeconds) {
+    if (isMock()) return Promise.reject(new Error("retention needs live M3; this page is on fixtures"));
+    var qs = olderThanSeconds ? "?older_than_seconds=" + encodeURIComponent(olderThanSeconds) : "";
+    return getJSON(ENDPOINTS.retention + qs);
+  }
+
+  /** Irreversible. Only called from a confirmed click in retention.js. */
+  function applyRetention(olderThanSeconds) {
+    if (isMock()) return Promise.reject(new Error("retention needs live M3; this page is on fixtures"));
+    var body = { confirm: true };
+    if (olderThanSeconds) body.older_than_seconds = olderThanSeconds;
+    return postJSON(ENDPOINTS.retention, body);
+  }
+
+  // ---------------------------------------------------------------------------------
+  // Model source — which model answers, chosen from the topbar.
+  //
+  // Mock mode reports the two options and refuses the switch. The fixtures answer from
+  // a scripted script, not a model, so "now using LM Studio" would be a claim about
+  // something this page is not doing.
+  // ---------------------------------------------------------------------------------
+  function loadModel() {
+    if (isMock()) {
+      return Promise.resolve({
+        active: "default",
+        model: "mock fixtures",
+        backend: "mock",
+        sources: [
+          { id: "default", label: "gemma-4-E2B-it", model: "fixtures", available: true, detail: "mock", note: "" },
+          { id: "lmstudio", label: "LM Studio", model: "—", available: false, detail: "live mode only", note: "" },
+        ],
+      });
+    }
+    return getJSON(ENDPOINTS.model);
+  }
+
+  function selectModel(source) {
+    if (isMock()) {
+      return Promise.reject(new Error("switching models needs live M3; this page is on fixtures"));
+    }
+    return postJSON(ENDPOINTS.model, { source: source });
   }
 
   function postJSON(url, body) {
@@ -396,11 +451,11 @@ SPARK.data = (function () {
     return prefix + "-" + String(Date.now()).slice(-6) + "-" + _seq;
   }
 
-  function ask(question, h) {
-    return isMock() ? askMock(question, h) : askLive(question, h);
+  function ask(question, h, opts) {
+    return isMock() ? askMock(question, h) : askLive(question, h, opts);
   }
 
-  function askLive(question, h) {
+  function askLive(question, h, opts) {
     var turn = {
       turn_id: newId("turn"),
       ts: nowIso(),
@@ -412,11 +467,23 @@ SPARK.data = (function () {
       latency_s: null,
     };
     h.onSubmitted(turn);
-    return postJSON(ENDPOINTS.ask, { question: question })
+    // `widen` is the user answering the previous turn's offer — "nothing in the last
+    // 30 minutes covers that; look further back?". Only a click sets it.
+    var body = { question: question };
+    if (opts && opts.widen) body.widen = true;
+    return postJSON(ENDPOINTS.ask, body)
       .then(function (resp) {
         // The server owns turn_id; adopt it so WebSocket refinements address the
         // right card. Everything else is ChatTurn.to_dict().
-        h.onProvisional(resp, { dedupe_of: resp.dedupe_of || null, job: resp.job || null }, turn.turn_id);
+        h.onProvisional(
+          resp,
+          {
+            dedupe_of: resp.dedupe_of || null,
+            job: resp.job || null,
+            widen_offer: resp.widen_offer || null,
+          },
+          turn.turn_id
+        );
         return resp;
       })
       .catch(function (err) {
@@ -546,6 +613,10 @@ SPARK.data = (function () {
     registerTask: registerTask,
     deleteTask: deleteTask,
     patchTask: patchTask,
+    retentionPlan: retentionPlan,
+    applyRetention: applyRetention,
+    loadModel: loadModel,
+    selectModel: selectModel,
     syntheticMonitorRow: syntheticMonitorRow,
     ask: ask,
     demoQuestions: demoQuestions,

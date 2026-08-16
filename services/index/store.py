@@ -21,6 +21,7 @@ from types import TracebackType
 from typing import Any
 
 from shared import config
+from shared.captions import split_caption
 from shared.schema import ChunkRecord, Tier, to_iso
 
 from .backend import BrowsePage, IndexCounts, ScoredChunk, VectorBackend, build_backend
@@ -206,7 +207,15 @@ class IndexStore:
         if not missing:
             return list(chunks)
 
-        vectors = self._embedder.embed_passages([chunks[i].caption for i in missing])
+        # The DESCRIPTION, not the whole caption. A task-aware caption ends in a WATCHING
+        # block quoting every standing task's wording (services/ingest/watchlist.py), so
+        # embedding it whole would give every chunk in the corpus an identical tail —
+        # flattening exactly the differences search exists to rank on, and pulling
+        # unrelated footage into any query that happens to share a word with a task.
+        # split_caption() is a no-op on captions without a block.
+        vectors = self._embedder.embed_passages(
+            [split_caption(chunks[i].caption).description for i in missing]
+        )
         if len(vectors) != len(missing):
             raise ValueError(
                 f"embedder returned {len(vectors)} vectors for {len(missing)} captions"
@@ -216,6 +225,35 @@ class IndexStore:
         for position, vector in zip(missing, vectors):
             prepared[position] = replace(chunks[position], embedding=vector)
         return prepared
+
+    # -- deletes -----------------------------------------------------------------
+
+    def select_before(self, cutoff: datetime) -> list[str]:
+        """Ids of every record — captioned and gated — that ended at or before ``cutoff``.
+
+        The read half of the retention sweep (``services/retention.py``). Reading and
+        deleting are two calls rather than one so the count can be shown to a human
+        first: this is the only operation in the system that destroys the join between a
+        caption and its pixels, and it does not come back.
+        """
+        self.ensure_ready()
+        return self._backend.select_before(cutoff)
+
+    def delete(self, chunk_ids: list[str]) -> int:
+        """Remove records by id. Returns how many existed to remove.
+
+        Gated rows go too. They are the skip-rate denominator (SPEC §2.3), so keeping
+        them past their captioned neighbours would inflate the measured skip rate of
+        every window that survived — a health metric quietly reporting on a corpus that
+        is no longer there.
+        """
+        if not chunk_ids:
+            return 0
+        self.ensure_ready()
+        with timed("index.delete", count=len(chunk_ids)) as span:
+            removed = self._backend.delete(chunk_ids)
+            span.fields["removed"] = removed
+        return removed
 
     # -- reads -------------------------------------------------------------------
 
@@ -270,7 +308,12 @@ class IndexStore:
         """Cross-encoder pass over the ANN candidates, truncated to ``top_n``."""
         if not candidates:
             return []
-        ranked = self._reranker.rank(query, [c.record.caption for c in candidates])
+        # Description only, for the same reason as the embedding above: a reranker scoring
+        # a query against three verbatim task descriptions ranks the watchlist, not the
+        # footage.
+        ranked = self._reranker.rank(
+            query, [split_caption(c.record.caption).description for c in candidates]
+        )
 
         hits: list[SearchHit] = []
         for rank, (position, score) in enumerate(ranked[:top_n]):

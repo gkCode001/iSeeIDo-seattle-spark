@@ -56,6 +56,7 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from shared.captions import CaptionParts, split_caption
 from shared.schema import ChunkRecord, DeepJob, JobState, Task, utcnow
 
 from services.index.embedding import Embedder, build_embedder
@@ -287,6 +288,25 @@ class Monitor:
             return list(chunk.embedding)
         return list(self.embedder.embed_passages([chunk.caption])[0])
 
+    def _description_vector(
+        self, chunk: ChunkRecord, parts: CaptionParts, fallback: list[float]
+    ) -> list[float]:
+        """The prose half's vector, for the cosine fallback path.
+
+        Only re-embeds when there is a WATCHING block to strip. A caption without one has
+        description == caption, so the vector already computed for the whole chunk is the
+        right answer and re-deriving it per task would embed the same text N times per
+        window for nothing.
+
+        When there IS a block, ``fallback`` is over the full caption and unusable: it
+        carries every task's wording, which is what inverts the ranking (shared/captions.py).
+        """
+        if not parts.has_watchlist:
+            return fallback
+        if not parts.description:
+            return fallback
+        return list(self.embedder.embed_passages([parts.description])[0])
+
     def _rt(self, task_id: str) -> _Runtime:
         return self._runtime.setdefault(task_id, _Runtime())
 
@@ -325,11 +345,44 @@ class Monitor:
             rt.stage1_chunk_id = chunk.chunk_id
             return FunnelOutcome(chunk.chunk_id, task.task_id, 0, "chunk gated; no caption")
 
-        # ---- stage 1: embedding match. Free, every chunk, deliberately loose. ---------
-        score = cosine(task.embedding, vector)
-        rt.stage1_score = score
+        # ---- stage 1: free, every chunk, deliberately loose. --------------------------
+        #
+        # Two paths, and the fast one is not the cosine.
+        #
+        # When M1 captioned with a watchlist (services/ingest/watchlist.py), the caption
+        # ends in a WATCHING block where the model — which saw the pixels — answered this
+        # task by name. That answer is used directly. It beats the cosine on both sides:
+        # it cannot miss a detail the prose omitted, and it cannot fire on a detail the
+        # prose merely mentioned.
+        #
+        # Embedding the caption in that case would be worse than useless. The block quotes
+        # every task's wording back, absent ones included, so cosine sees "vehicle", "fire
+        # door" and matches — measured at 0.38/0.40 for two absent tasks against 0.30 for
+        # the one present task. See shared/captions.py for the numbers. Hence `parts.description`
+        # everywhere below, never `chunk.caption`.
+        parts = split_caption(chunk.caption)
+        verdict_1 = parts.verdict_for(task.describe) if parts.has_watchlist else None
+
         rt.stage1_chunk_id = chunk.chunk_id
-        rt.stage1_matched = score >= self.settings.stage1_cosine_threshold
+        if verdict_1 is not None:
+            # A stated answer. The score is reported as 1.0/0.0 so the Watch pane's stage-1
+            # readout stays a number, but it is a verdict and the threshold does not apply.
+            score = 1.0 if verdict_1 else 0.0
+            rt.stage1_score = score
+            rt.stage1_matched = verdict_1
+            basis = "caption watchlist: present"
+            miss_reason = "stage 1 miss: caption reports this item absent"
+        else:
+            # No watchlist on this caption — written before the feature, or the model
+            # skipped the line. Fall back to the cosine over the DESCRIPTION only.
+            score = cosine(task.embedding, self._description_vector(chunk, parts, vector))
+            rt.stage1_score = score
+            rt.stage1_matched = score >= self.settings.stage1_cosine_threshold
+            basis = f"cosine {score:.3f}"
+            miss_reason = (
+                f"stage 1 miss: {score:.3f} < {self.settings.stage1_cosine_threshold:g}"
+            )
+
         if not rt.stage1_matched:
             rt.break_run()
             rt.stage2_verdict = None
@@ -337,12 +390,21 @@ class Monitor:
                 chunk.chunk_id,
                 task.task_id,
                 1,
-                f"stage 1 miss: {score:.3f} < {self.settings.stage1_cosine_threshold:g}",
+                miss_reason,
                 stage1_score=score,
             )
         self.stats["stage1_candidates"] += 1
 
         # ---- stage 2: LLM confirm, on candidates only. -------------------------------
+        #
+        # Deliberately the FULL caption, WATCHING block included, not `parts.description`.
+        # Handing stage 2 the prose alone would re-open the exact hole the watchlist
+        # closes: the prose is what omitted the detail in the first place, so stage 2
+        # would read a description that never mentions a red wristband and veto a task
+        # stage 1 correctly matched. The cost is that stage 2 can rubber-stamp stage 1's
+        # verdict instead of checking it independently — accepted, because stage 3
+        # re-watches the footage at 4 fps and it is stage 3, not stage 2, that stands
+        # between a guess and a human (SPEC §6.2).
         self.stats["stage2_confirms"] += 1
         verdict = self.confirmer.confirm(chunk.caption, task)
         rt.stage2_verdict = verdict.verdict
@@ -398,7 +460,7 @@ class Monitor:
                 },
             )
 
-        return self._act(task, chunk, rt, score, held, needed)
+        return self._act(task, chunk, rt, score, held, needed, basis)
 
     # ----------------------------------------------------------------------------------
     # Acting — SPEC §6.3. Fire on stage 2; attach stage 3 afterwards.
@@ -412,6 +474,7 @@ class Monitor:
         score: float,
         held: float,
         needed: int,
+        basis: str,
     ) -> FunnelOutcome:
         """Request the task's action for the whole sustained run.
 
@@ -425,7 +488,11 @@ class Monitor:
         """
         assert rt.run_since is not None and rt.run_until is not None  # noqa: S101
         reason = (
-            f"task {task.task_id}: {task.describe} | stage1 cosine {score:.3f} | "
+            # `basis` rather than a bare "cosine": stage 1 has two paths now and the
+            # action log is the only record of why an alert fired (SPEC §6.4). Reporting a
+            # verdict as "cosine 1.000" would describe a similarity score that the embedder
+            # cannot actually produce, and send anyone debugging it to the wrong module.
+            f"task {task.task_id}: {task.describe} | stage1 {basis} | "
             f"sustained {held:.0f}s of {needed}s | caption: {chunk.caption}"
         )
         result = self.actions.fire(

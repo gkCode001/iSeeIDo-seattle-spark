@@ -17,6 +17,10 @@
   "recorder": {
     "segment_seconds": 60
   },
+  "retention": {
+    "max_age_seconds": 10800,
+    "min_age_seconds": 900
+  },
   "ingest": {
     "window_seconds": 5,
     "stride_seconds": 4,
@@ -52,12 +56,12 @@
     }
   },
   "monitor": {
-    "stage1_cosine_threshold": 0.35,
+    "stage1_cosine_threshold": 0.15,
     "stage2_sustain_default": 120,
     "default_cooldown_seconds": 300
   },
   "ui": {
-    "display_timezone": "Asia/Kolkata",
+    "display_timezone": "America/Los_Angeles",
     "time_format": "%H:%M:%S",
     "poll_interval_ms": 1000,
     "vendored_assets_only": true

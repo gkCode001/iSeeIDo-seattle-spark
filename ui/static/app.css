@@ -34,6 +34,27 @@
   box-sizing: border-box;
 }
 
+/* The `hidden` attribute must actually hide.
+ *
+ * The browser implements it as `[hidden] { display: none }` in the UA stylesheet, which
+ * ANY class selector out-specifies. So the moment a component gets `display: flex` or
+ * `display: block`, every `el.hidden = true` in the JS silently stops working — the
+ * attribute is set, the element stays on screen, and nothing anywhere reports an error.
+ *
+ * This has now cost us three times: the player's canvas/video pair sat as a dead black
+ * rectangle, `.live-offline` showed over a working camera, and `.purge` — the confirm
+ * panel for the one control on this page that destroys footage — was displayed
+ * permanently instead of on click, so the page always looked like it was mid-delete.
+ *
+ * Hence one rule at the top rather than a fourth patch at the bottom. `!important` is
+ * deliberate: it has to beat whatever a component declares, which is the entire point.
+ * To show something, remove the attribute; do not fight this with a more specific
+ * selector.
+ */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   height: 100%;
@@ -101,6 +122,183 @@ body {
   color: var(--ok);
   border-color: rgba(88, 209, 160, 0.5);
   background: rgba(88, 209, 160, 0.1);
+}
+
+/* The delete control. Red because it destroys footage, and quiet enough at rest that a
+   three-pane cockpit does not read as an alarm — it earns attention on hover and in the
+   panel below, not by sitting on the page shouting. */
+.pill--danger {
+  color: var(--bad);
+  border-color: rgba(224, 112, 106, 0.45);
+  background: rgba(224, 112, 106, 0.08);
+  cursor: pointer;
+}
+.pill--danger:hover:not(:disabled) {
+  border-color: var(--bad);
+  background: rgba(224, 112, 106, 0.18);
+}
+.pill--danger:disabled {
+  color: var(--muted);
+  border-color: var(--line);
+  background: var(--panel-2);
+  cursor: not-allowed;
+}
+
+/* The model selector.
+   Info-blue, not red: switching which model answers is reversible in one click, unlike
+   the control beside it. A dropdown rather than the purge strip's full-width panel for
+   the same reason — this one is meant to be opened, read and dismissed mid-demo. */
+.model {
+  position: relative;
+}
+.pill--model {
+  color: var(--info);
+  border-color: rgba(106, 168, 224, 0.45);
+  background: rgba(106, 168, 224, 0.08);
+  cursor: pointer;
+}
+.pill--model:hover {
+  border-color: var(--info);
+  background: rgba(106, 168, 224, 0.18);
+}
+/* Both servers up: two model processes against one 128 GB pool (invariant 1). Amber on
+   the pill itself, because the panel that explains it is closed by default. */
+.pill--warn {
+  color: var(--warn);
+  border-color: rgba(224, 168, 64, 0.5);
+  background: rgba(224, 168, 64, 0.1);
+}
+
+.model-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 40;
+  width: 340px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.5);
+}
+.model-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.model-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+  padding: 7px 9px;
+  text-align: left;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text-dim);
+  cursor: pointer;
+  font-family: var(--sans);
+}
+.model-row:hover:not(:disabled) {
+  border-color: var(--info);
+  background: var(--panel-3);
+}
+.model-row:disabled {
+  cursor: not-allowed;
+  opacity: 0.75;
+}
+.model-row--on {
+  border-color: rgba(88, 209, 160, 0.5);
+  background: rgba(88, 209, 160, 0.07);
+}
+.model-row--off {
+  opacity: 0.6;
+}
+.model-row-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text);
+}
+.model-row-tick {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--ok);
+}
+/* The model id, monospace and full: the point of switching is comparing two models on
+   one question, and an elided id makes the comparison unciteable afterwards. */
+.model-row-id {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+.model-row-why {
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--muted);
+}
+.model-row-why--bad {
+  color: var(--warn);
+}
+.model-note {
+  margin: 8px 2px 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--warn);
+}
+.model-scope {
+  margin: 6px 2px 0;
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+/* Confirmation strip. Full width, under the topbar, in the flow — it pushes the console
+   down rather than floating over it, so it cannot be dismissed by the stray click that
+   opened it and cannot be missed by someone looking at a pane. */
+.purge {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  font-family: var(--mono);
+  font-size: 12px;
+  background: rgba(224, 112, 106, 0.1);
+  border-bottom: 1px solid rgba(224, 112, 106, 0.4);
+}
+.purge-line {
+  margin: 0;
+  color: var(--text);
+  flex: 1 1 320px;
+  line-height: 1.5;
+}
+.purge-note {
+  margin: 0;
+  flex: 1 1 100%;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.purge-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.btn--danger {
+  background: rgba(224, 112, 106, 0.16);
+  border-color: rgba(224, 112, 106, 0.55);
+  color: #f6d2cf;
+}
+.btn--danger:hover:not(:disabled) {
+  border-color: var(--bad);
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .banner {
@@ -278,13 +476,6 @@ code {
   border-radius: 4px;
   border: 1px solid var(--line);
   background: #000;
-}
-/* display:block above out-specifies the [hidden] attribute, which otherwise leaves the
-   inactive surface sitting there as a dead black rectangle. Only one of the two is ever
-   live: the canvas in mock mode, the <video> once M3 serves the range. */
-.player-frame canvas[hidden],
-.player-frame video[hidden] {
-  display: none;
 }
 .player-side {
   min-width: 0;
@@ -763,6 +954,12 @@ code {
 .task-form > summary:hover {
   color: var(--text);
 }
+/* The registration receipt, parked on the summary because that is the part of the
+   <details> that survives collapsing. Declared after :hover so pointing at it does not
+   grey out the confirmation. */
+.task-form > summary.summary--ok {
+  color: var(--ok);
+}
 .task-form form {
   margin-top: 10px;
   display: flex;
@@ -995,9 +1192,6 @@ code {
   min-height: 180px;
   object-fit: contain;
 }
-.player-frame img[data-live-img][hidden] {
-  display: none;
-}
 .badge--live {
   color: var(--ok);
   border-color: color-mix(in srgb, var(--ok) 45%, transparent);
@@ -1097,12 +1291,6 @@ code {
   overflow: auto;
 }
 
-/* `display:flex` above out-specifies the [hidden] attribute, exactly as the canvas/video
-   rule further up warns. Without this the "no live frame" placeholder sits BESIDE the
-   working image instead of being replaced by it. */
-.live-offline[hidden] {
-  display: none;
-}
 
 /* Delete control on a standing-task card. Deliberately quiet until hovered: it is
    destructive and sits on every card, so it should not compete with the funnel state
@@ -1461,4 +1649,29 @@ a.pill:hover {
   .corpus {
     flex-wrap: wrap;
   }
+}
+
+/* The widen offer — "nothing in the last 30 minutes answers this; search back?"
+   Styled as a question the user answers, not as a status line: the choice behind it is
+   whether to spend tens of seconds of the single VLM slot re-watching footage. */
+.widen {
+  margin-top: 8px;
+  padding: 9px 10px;
+  border: 1px dashed color-mix(in srgb, var(--info) 45%, var(--line));
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--info) 7%, transparent);
+}
+.widen-text {
+  margin: 0 0 8px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.widen-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.btn--small {
+  font-size: 11.5px;
+  padding: 4px 9px;
 }

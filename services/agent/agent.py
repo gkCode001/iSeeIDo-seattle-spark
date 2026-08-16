@@ -99,10 +99,15 @@ class Escalation:
     t_start: datetime | None = None
     t_end: datetime | None = None
     timeout_seconds: float = 0.0
+    #: The turn WOULD have escalated, but the recent window is the thing that came up
+    #: short, so the wider search is being offered instead. `escalated` is False and no
+    #: job exists — the record still says the gate fired, which is what the badge reads.
+    deferred: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "escalated": self.escalated,
+            "deferred": self.deferred,
             "triggers": list(self.triggers),
             "gate": self.gate.to_dict(),
             "tool_requested": self.tool_requested,
@@ -124,6 +129,11 @@ class AskResult:
     dedupe_of: str | None = None
     tool_calls: list[ToolInvocation] = field(default_factory=list)
     retrieval: dict[str, Any] = field(default_factory=dict)
+    #: Set when the recent window could not answer and the user is being OFFERED a wider
+    #: search rather than given one. No job is queued while this is pending: the deep
+    #: path costs tens of seconds of the single VLM slot, and spending that on a guess
+    #: about what the user meant is how "I don't know" becomes a 90 s wait.
+    widen_offer: dict[str, Any] | None = None
 
     def to_payload(self) -> dict[str, Any]:
         """``POST /api/ask``'s body: ``ChatTurn.to_dict()`` plus the optional extras.
@@ -140,6 +150,7 @@ class AskResult:
         payload["retrieval"] = dict(self.retrieval)
         payload["tool_calls"] = [call.to_dict() for call in self.tool_calls]
         payload["cited"] = [hit.to_dict() for hit in self.hits]
+        payload["widen_offer"] = dict(self.widen_offer) if self.widen_offer else None
         return payload
 
 
@@ -158,6 +169,21 @@ class AskAgent:
         self._log = chat_log
         self._s = settings
 
+    # -- the model behind it ------------------------------------------------------------
+
+    @property
+    def backend(self) -> LLMBackend:
+        return self._llm
+
+    def use_backend(self, backend: LLMBackend) -> None:
+        """Answer subsequent turns with a different model.
+
+        Rebinding rather than rebuilding the agent is deliberate: the chat log, the
+        toolbox and the job registry all outlive the choice of model, and a turn already
+        in flight keeps the backend it started with. Only *later* turns move.
+        """
+        self._llm = backend
+
     # -- the turn --------------------------------------------------------------------
 
     def ask(
@@ -167,6 +193,7 @@ class AskAgent:
         turn_id: str | None = None,
         t_from: datetime | None = None,
         t_to: datetime | None = None,
+        widen: bool = False,
     ) -> AskResult:
         """Answer a question provisionally. **Never blocks on deep analysis.**
 
@@ -179,12 +206,26 @@ class AskAgent:
             raise ValueError("question is empty")
         turn_id = turn_id or f"turn-{uuid.uuid4().hex[:8]}"
 
-        with timed("agent.ask", turn_id=turn_id, question=question) as span:
-            hits = self._tools.search_index(question, t_from, t_to)
+        # The surface is asked about NOW, so an ask covers the recent window unless the
+        # caller gave an explicit range or has already agreed to look further back.
+        explicit_range = t_from is not None or t_to is not None
+        lookback = (
+            self._s.search_extended_lookback_seconds
+            if widen
+            else self._s.search_lookback_seconds
+        )
+
+        with timed("agent.ask", turn_id=turn_id, question=question, widened=widen) as span:
+            hits = self._tools.search_index(question, t_from, t_to, lookback_seconds=lookback)
             context = self._tools.as_context(hits)
 
-            gate = self._gate(question, context)
-            answer, calls = self._answer(question, context)
+            # Read once and pass to both calls. Reading twice would be one more file
+            # scan on the user's turn, and worse, the two calls could disagree about
+            # what the conversation was if a refinement landed between them.
+            history = self._recent_turns()
+
+            gate = self._gate(question, context, history)
+            answer, calls = self._answer(question, context, history)
 
             deep_call = next((c for c in calls if c.name == DEEP_TOOL), None)
             other_calls = [c for c in calls if c.name != DEEP_TOOL]
@@ -207,6 +248,25 @@ class AskAgent:
                 why=_why(gate, deep_call),
                 timeout_seconds=self._s.deep_timeout_seconds,
             )
+
+            # Offer the wider search instead of taking it. Only when the recent window
+            # is what failed: an explicit range is the caller's decision, and a question
+            # already widened has nowhere further to go — that one escalates for real.
+            widen_offer: dict[str, Any] | None = None
+            if (
+                escalation.escalated
+                and self._s.confirm_before_widening
+                and not widen
+                and not explicit_range
+            ):
+                widen_offer = {
+                    "reason": escalation.why,
+                    "searched_seconds": int(self._s.search_lookback_seconds),
+                    "offer_seconds": int(self._s.search_extended_lookback_seconds),
+                    "question": question,
+                }
+                escalation.escalated = False
+                escalation.deferred = True
 
             job: DeepJob | None = None
             dedupe_of: str | None = None
@@ -266,11 +326,49 @@ class AskAgent:
             dedupe_of=dedupe_of,
             tool_calls=invocations,
             retrieval=self._retrieval_meta(hits),
+            widen_offer=widen_offer,
         )
 
     # -- the two model calls ---------------------------------------------------------
 
-    def _gate(self, question: str, context: Sequence[Any]) -> GateVerdict:
+    def _recent_turns(self) -> list[tuple[str, str]]:
+        """The last few exchanges as ``(question, answer)``, oldest first.
+
+        Read from the chat log rather than held in memory: the log is the durable record
+        (SPEC §11.4), and M3 can restart mid-conversation. A follow-up asked after a
+        reload should still resolve against what was said before it.
+
+        Where a turn escalated and the refinement has since landed, the refined answer is
+        appended to the provisional one rather than replacing it — CLAUDE.md invariant 4
+        is about what the *user* sees, but the same reasoning applies to what the model
+        sees: the pair is the record, and the provisional half is what the user's next
+        question is most likely reacting to.
+        """
+        limit = self._s.history_context_turns
+        if limit <= 0:
+            return []
+        try:
+            history = self._log.read(limit)
+        except Exception as exc:  # noqa: BLE001 - a missing/corrupt log must not kill a turn
+            log_event("agent.history.unavailable", error=f"{type(exc).__name__}: {exc}")
+            return []
+
+        clip = self._s.history_context_answer_chars
+        out: list[tuple[str, str]] = []
+        for turn in history.turns[-limit:]:
+            answer = _clip_text(turn.provisional_answer, clip)
+            job = history.jobs.get(turn.job_id) if turn.job_id else None
+            if job is not None and job.answer:
+                answer = f"{answer}\n    (refined) {_clip_text(job.answer, clip)}"
+            out.append((turn.question, answer))
+        return out
+
+    def _gate(
+        self,
+        question: str,
+        context: Sequence[Any],
+        history: Sequence[tuple[str, str]] = (),
+    ) -> GateVerdict:
         """SPEC §4.2 mechanism 1. One extra call, before answering, yes or no.
 
         Retrieval distance is **not** consulted, here or anywhere: ANN always returns a
@@ -283,7 +381,7 @@ class AskAgent:
         request = LLMRequest(
             purpose=Purpose.GROUNDEDNESS,
             system=self._s.groundedness_prompt,
-            user=_gate_prompt(question, context),
+            user=_gate_prompt(question, context, history),
             # A yes/no plus one sentence. Same reasoning as CLAUDE.md invariant 6:
             # output tokens are the latency dial, and this call sits on the user's turn.
             max_tokens=min(self._s.max_tokens, 96),
@@ -314,13 +412,16 @@ class AskAgent:
         return GateVerdict(grounded=grounded, reason=reason)
 
     def _answer(
-        self, question: str, context: Sequence[Any]
+        self,
+        question: str,
+        context: Sequence[Any],
+        history: Sequence[tuple[str, str]] = (),
     ) -> tuple[str, tuple[ToolCall, ...]]:
         """The provisional answer, with the tools offered (SPEC §4.2 mechanism 2)."""
         request = LLMRequest(
             purpose=Purpose.ANSWER,
             system=self._s.answer_prompt,
-            user=_answer_prompt(question, context),
+            user=_answer_prompt(question, context, history),
             max_tokens=self._s.max_tokens,
             temperature=self._s.temperature,
             tools=TOOL_SCHEMAS,
@@ -360,8 +461,48 @@ def _render_context(context: Sequence[Any]) -> str:
     return "\n".join(chunk.render() for chunk in context)
 
 
-def _gate_prompt(question: str, context: Sequence[Any]) -> str:
+def _clip_text(text: str, limit: int) -> str:
+    text = " ".join(str(text or "").split())
+    if limit <= 0 or len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "…"
+
+
+def _render_history(history: Sequence[tuple[str, str]]) -> str:
+    """Prior exchanges, oldest first, numbered so the model can tell them apart."""
+    lines: list[str] = []
+    for index, (question, answer) in enumerate(history, start=1):
+        lines.append(f"[{index}] Q: {question}")
+        lines.append(f"    A: {answer or '(no answer recorded)'}")
+    return "\n".join(lines)
+
+
+#: The line that keeps prior turns from becoming evidence.
+#:
+#: Without it, adding history makes the gate strictly worse: asked "what were they
+#: wearing?", a model that can see its own previous answer will happily call the question
+#: grounded because *it* said something about a person a minute ago — which is precisely
+#: the confident-answer-from-absent-evidence failure the gate exists to catch (SPEC §4.2).
+#: The history is there so the model knows what "they" refers to. The captions, and only
+#: the captions, decide whether the answer is in the record.
+_HISTORY_IS_NOT_EVIDENCE = (
+    "The conversation above is ONLY for working out what the question refers to — who "
+    "'they' are, which door, which time. It is NOT evidence: an earlier answer is not a "
+    "record of the footage. Judge solely against the RETRIEVED CONTEXT below."
+)
+
+
+def _gate_prompt(
+    question: str, context: Sequence[Any], history: Sequence[tuple[str, str]] = ()
+) -> str:
+    preamble = ""
+    if history:
+        preamble = (
+            f"CONVERSATION SO FAR (most recent last):\n{_render_history(history)}\n\n"
+            f"{_HISTORY_IS_NOT_EVIDENCE}\n\n"
+        )
     return (
+        f"{preamble}"
         f"QUESTION:\n{question}\n\n"
         f"RETRIEVED CONTEXT ({len(context)} captions):\n{_render_context(context)}\n\n"
         "Can the question be answered from this context alone? YES or NO, then one "
@@ -369,8 +510,17 @@ def _gate_prompt(question: str, context: Sequence[Any]) -> str:
     )
 
 
-def _answer_prompt(question: str, context: Sequence[Any]) -> str:
+def _answer_prompt(
+    question: str, context: Sequence[Any], history: Sequence[tuple[str, str]] = ()
+) -> str:
+    preamble = ""
+    if history:
+        preamble = (
+            f"CONVERSATION SO FAR (most recent last):\n{_render_history(history)}\n\n"
+            f"{_HISTORY_IS_NOT_EVIDENCE}\n\n"
+        )
     return (
+        f"{preamble}"
         f"QUESTION:\n{question}\n\n"
         f"RETRIEVED CONTEXT ({len(context)} captions, wall clock is UTC):\n"
         f"{_render_context(context)}\n\n"

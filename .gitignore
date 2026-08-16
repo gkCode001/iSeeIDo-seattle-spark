@@ -27,3 +27,8 @@ data/live.jpg
 # The 2-minute fixture clip SPEC/CLAUDE.md asks for is source, not output — it is the
 # only video in the tree that belongs in git.
 !tests/fixtures/
+
+# Published by the agent server on every task change and polled by M1 (invariant: the
+# captioner needs the task list across a process boundary). Derived from config/tasks.yaml
+# plus runtime CRUD, so it is runtime state rather than source.
+data/watchlist.json

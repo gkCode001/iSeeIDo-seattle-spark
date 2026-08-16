@@ -20,8 +20,10 @@ that file is the contract:
     GET  /api/tasks                         -> {tasks: [Task]}
     GET  /api/monitor/state                 -> funnel state (§11.3)
     GET  /api/actions         ?t_from&t_to  -> {entries: [ActionLogEntry]}
+    GET  /api/retention       ?older_than_seconds -> what a sweep WOULD delete
     GET  /api/video           ?t_from&t_to  -> stitched footage, NEVER ?file=
     POST /api/ask             {question}    -> ChatTurn.to_dict() + {dedupe_of?, job?}
+    POST /api/retention       {confirm, older_than_seconds?} -> deletes footage. Final.
     POST /api/register_task   Task fields   -> Task
     WS   /ws                                -> refinement | monitor_state | action
 
@@ -44,14 +46,17 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 from services.index import IndexStore, build_index
+from services.ingest.watchlist import write_watchlist
 from services.mcp import ActionServer, ClipCutter, NullClipCutter, build_clip_plan, clip_path_for
-from shared import config, timecode
+from services.retention import RetentionSettings, apply_retention, plan_retention
+from shared import config, lmstudio, timecode
+from shared.lmstudio import LMStudioError
 from shared.schema import DeepJob, JobState, Tier, from_iso, to_iso, utcnow
 
 from .agent import AskAgent
 from .deep import JobRegistry, JobUpdate, UnavailableAnalyzer, WorkerAnalyzer
 from .history import ChatLog
-from .llm import build_backend
+from .llm import DEFAULT_SOURCE, build_backend, build_source_backend, describe_sources
 from .settings import AgentSettings
 from .tasks import DuplicateTaskError, SeedTaskRegistry, TaskRegistry, task_from_payload
 from .telemetry import log_event
@@ -82,11 +87,20 @@ class AgentApp:
     hub: WebSocketHub
     settings: AgentSettings
     clip_cutter: ClipCutter
+    #: Overridable like every other dependency, and for a sharper reason than the rest:
+    #: this one names the directory the retention routes DELETE from. A test that picked
+    #: it up from config would unlink the real archive.
+    retention: RetentionSettings | None = None
     #: M5, running in this process. SPEC §1 draws it as its own module, which it is —
     #: but as a separate PROCESS it would need its own copy of the task registry, and a
     #: task registered through this server would never reach it. Sharing the registry is
     #: what makes "create a task, then have it fire" true.
     monitor: Any | None = None
+    #: Which model source the topbar selector is on. Mutable, unlike everything above it:
+    #: this is the one dependency the page is allowed to rebind at runtime. Held here and
+    #: not read back off the backend because ``default`` and ``lmstudio`` can resolve to
+    #: the same model id — the id does not say which endpoint served it.
+    model_source: str = DEFAULT_SOURCE
 
     # -- lifecycle --------------------------------------------------------------------
 
@@ -111,6 +125,10 @@ class AgentApp:
                 )
             )
         self.jobs.start()
+        # Reconcile the captioner's watchlist with the task set this process actually
+        # holds. Without this, a file left by a previous run keeps steering captions
+        # toward tasks that died with that process.
+        self._publish_watchlist()
         if self.monitor is not None:
             self.monitor.start()
 
@@ -149,6 +167,71 @@ class AgentApp:
     def get_config(self) -> tuple[int, dict[str, Any]]:
         """``config/settings.yaml`` as JSON. Read, never written — it is owned elsewhere."""
         return HTTPStatus.OK, dict(config.load())
+
+    def get_model(self) -> tuple[int, dict[str, Any]]:
+        """Which model is answering, and what else this box could answer with.
+
+        Probes both sources on every call rather than caching: LM Studio's model is
+        loaded and unloaded from a GUI this process cannot see, so a cached "available"
+        is a promise we have no way to keep.
+        """
+        sources = describe_sources(self.settings)
+        active = self.model_source
+        payload: dict[str, Any] = {
+            "active": active,
+            "model": self.agent.backend.model,
+            "backend": self.agent.backend.name,
+            "sources": [source.to_dict() for source in sources],
+            # The selector rebinds THIS surface. Ingest is another process holding
+            # another client, and saying so on the page is cheaper than someone
+            # discovering it from a caption that did not change.
+            "scope": "ask surface only — M1's captioner keeps using vlm.endpoint",
+        }
+        both_up = active == DEFAULT_SOURCE and any(
+            s.id == lmstudio.BACKEND and s.available for s in sources
+        )
+        if both_up:
+            payload["warning"] = (
+                "LM Studio is also serving a model. Two model processes share one 128 GB "
+                "pool — quit one before the demo (CLAUDE.md invariant 1)."
+            )
+        return HTTPStatus.OK, payload
+
+    def post_model(self, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        """Switch the ask surface onto another model source.
+
+        Builds first and rebinds only on success, so a failed switch leaves the surface
+        answering with the model it already had rather than with nothing.
+        """
+        source = str(body.get("source") or "").strip()
+        if not source:
+            return HTTPStatus.BAD_REQUEST, {"detail": "body needs a `source`"}
+        if source == self.model_source:
+            return self.get_model()
+        try:
+            backend = build_source_backend(source, self.settings)
+        except ValueError as exc:
+            return HTTPStatus.BAD_REQUEST, {"detail": str(exc)}
+        except LMStudioError as exc:
+            # The expected failure: nothing loaded, too small a context, nothing
+            # listening. It is the user's to fix in the GUI, so hand back the sentence.
+            return HTTPStatus.CONFLICT, {"detail": str(exc)}
+        except Exception as exc:  # noqa: BLE001 - one bad switch, not one dead server
+            return HTTPStatus.BAD_GATEWAY, {"detail": f"{type(exc).__name__}: {exc}"}
+
+        previous = self.agent.backend.model
+        self.agent.use_backend(backend)
+        self.model_source = source
+        log_event(
+            "agent.model.switched",
+            source=source,
+            model=backend.model,
+            backend=backend.name,
+            previous=previous,
+        )
+        status, payload = self.get_model()
+        payload["switched_from"] = previous
+        return status, payload
 
     def get_chunks(
         self, t_from: datetime | None, t_to: datetime | None
@@ -296,14 +379,48 @@ class AgentApp:
     # -- routes: writes ----------------------------------------------------------------
 
     def post_ask(self, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
-        """SPEC §4. Returns the provisional turn; never awaits the deep job."""
+        """SPEC §4. Returns the provisional turn; never awaits the deep job.
+
+        ``widen: true`` is the user answering the offer this endpoint made on the
+        previous turn — "nothing in the last 30 minutes covers that; look further back?".
+        It searches the extended window and, if that still cannot answer, escalates for
+        real. Only the user can set it: reaching for the deep path unasked is how "I
+        don't know" turns into a 90 s wait on the single VLM slot.
+        """
         question = str(body.get("question") or "").strip()
         if not question:
             return HTTPStatus.BAD_REQUEST, {"detail": "question is required"}
         t_from = _parse_iso(body.get("t_from"))
         t_to = _parse_iso(body.get("t_to"))
-        result = self.agent.ask(question, t_from=t_from, t_to=t_to)
+        result = self.agent.ask(
+            question, t_from=t_from, t_to=t_to, widen=bool(body.get("widen"))
+        )
         return HTTPStatus.OK, result.to_payload()
+
+    def _publish_watchlist(self) -> None:
+        """Push the live task set to the file M1's captioner polls.
+
+        M5's stage 1 is a cosine against the caption and stage 2 re-reads the caption, so
+        a detail the caption omits is a task that can never fire (see
+        ``services/ingest/watchlist.py``). M1 appends the active tasks to its caption
+        prompt to close that hole — but M1 is a separate process and runtime
+        registrations live in nobody's config file, so the list has to reach it through
+        something both can see.
+
+        Called from every mutation rather than from the task store, because ``self.tasks``
+        is duck-typed: it may be the agent's placeholder store or M5's real registry, and
+        this is the one place both converge.
+
+        Failures are logged and swallowed. A stale watchlist degrades captions to general
+        ones; an exception here would fail a task edit the user just made and did not
+        ask to have coupled to ingest.
+        """
+        if not bool(config.get("ingest.watchlist.enabled", True)):
+            return
+        try:
+            write_watchlist(config.repo_path("ingest.watchlist.path"), self.tasks.tasks())
+        except Exception as exc:  # noqa: BLE001 - see docstring
+            log_event("agent.watchlist.publish_failed", error=str(exc))
 
     def post_register_task(self, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         """SPEC §10 D5 / §11.3. The endpoint is ours; the registry is M5's."""
@@ -315,6 +432,7 @@ class AgentApp:
             registered = self.tasks.register(task)
         except DuplicateTaskError as exc:
             return HTTPStatus.CONFLICT, {"detail": str(exc)}
+        self._publish_watchlist()
         return HTTPStatus.OK, registered.to_dict()
 
     def delete_task(self, task_id: str) -> tuple[int, dict[str, Any]]:
@@ -337,6 +455,7 @@ class AgentApp:
             return HTTPStatus.NOT_FOUND, {"detail": f"no such task: {task_id}"}
         except ValueError as exc:
             return HTTPStatus.BAD_REQUEST, {"detail": str(exc)}
+        self._publish_watchlist()
         return HTTPStatus.OK, {"deleted": removed.to_dict()}
 
     def patch_task(self, task_id: str, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
@@ -365,7 +484,101 @@ class AgentApp:
             return HTTPStatus.NOT_FOUND, {"detail": f"no such task: {task_id}"}
         except ValueError as exc:
             return HTTPStatus.BAD_REQUEST, {"detail": str(exc)}
+        self._publish_watchlist()
         return HTTPStatus.OK, updated.to_dict()
+
+    # -- routes: retention ---------------------------------------------------------------
+
+    def get_retention(self, older_than_seconds: float | None = None) -> tuple[int, dict[str, Any]]:
+        """``GET /api/retention`` — what a sweep *would* delete. Deletes nothing.
+
+        The read half of ``services/retention.py``'s plan/apply split, exposed as its own
+        endpoint so the button can put real counts in front of a human before the one
+        irreversible operation in this system runs.
+        """
+        settings = self._retention_settings()
+        try:
+            plan = plan_retention(
+                self.index, older_than_seconds=older_than_seconds, settings=settings
+            )
+        except ValueError as exc:
+            return HTTPStatus.BAD_REQUEST, {"detail": str(exc)}
+        except Exception as exc:  # noqa: BLE001 — a broken archive is a 503, not a 500
+            return HTTPStatus.SERVICE_UNAVAILABLE, {"detail": f"{type(exc).__name__}: {exc}"}
+        payload = plan.to_dict()
+        payload["defaults"] = {
+            "max_age_seconds": settings.max_age_seconds,
+            "min_age_seconds": settings.min_age_seconds,
+        }
+        return HTTPStatus.OK, payload
+
+    def post_retention(self, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        """``POST /api/retention`` — delete footage and captions older than the cutoff.
+
+        **Irreversible, and the only route here that destroys anything.** Three things
+        stand in front of it:
+
+        * ``confirm: true`` is required. A route that deletes an afternoon of footage
+          should not be reachable by a stray POST or a page that reloaded oddly.
+        * ``retention.min_age_seconds`` is enforced in the planner, not here, so the CLI
+          and the endpoint refuse the same requests.
+        * An in-flight deep job over the doomed range blocks the sweep. M4 re-reads the
+          archive by time range; deleting the footage under a running job turns a 90 s
+          escalation into a decode error, on stage, with no way to tell the two apart.
+
+        The plan is recomputed here rather than trusted from the client — the ids in a
+        GET from thirty seconds ago are a description of the disk, not a licence to
+        delete whatever the request names.
+        """
+        if not bool(body.get("confirm")):
+            return HTTPStatus.BAD_REQUEST, {
+                "detail": "confirm: true is required; this deletes footage permanently"
+            }
+        requested = body.get("older_than_seconds")
+        try:
+            older_than = None if requested is None else float(requested)
+        except (TypeError, ValueError):
+            return HTTPStatus.BAD_REQUEST, {
+                "detail": f"older_than_seconds must be a number, got {requested!r}"
+            }
+
+        try:
+            plan = plan_retention(
+                self.index,
+                older_than_seconds=older_than,
+                settings=self._retention_settings(),
+            )
+        except ValueError as exc:
+            return HTTPStatus.BAD_REQUEST, {"detail": str(exc)}
+        except Exception as exc:  # noqa: BLE001
+            return HTTPStatus.SERVICE_UNAVAILABLE, {"detail": f"{type(exc).__name__}: {exc}"}
+
+        blocking = self._jobs_over(plan.cutoff)
+        if blocking:
+            return HTTPStatus.CONFLICT, {
+                "detail": (
+                    f"{len(blocking)} deep job(s) are re-watching footage older than "
+                    f"{to_iso(plan.cutoff)}: {', '.join(blocking)}. Deleting it now would "
+                    f"fail them mid-flight. Wait for them to land."
+                ),
+                "jobs": blocking,
+            }
+
+        result = apply_retention(self.index, plan)
+        return HTTPStatus.OK, result.to_dict()
+
+    def _jobs_over(self, cutoff: datetime) -> list[str]:
+        """Ids of queued/running deep jobs whose range reaches back past ``cutoff``."""
+        live = (JobState.QUEUED, JobState.RUNNING)
+        return sorted(
+            job_id
+            for job_id, job in self.jobs.jobs().items()
+            if job.state in live and job.t_start < cutoff
+        )
+
+    def _retention_settings(self) -> RetentionSettings:
+        """Injected if the caller supplied one, from config otherwise."""
+        return self.retention if self.retention is not None else RetentionSettings.from_config()
 
     # -- routes: video ------------------------------------------------------------------
 
@@ -490,6 +703,22 @@ class _Handler(BaseHTTPRequestHandler):
         except ValueError:
             return default
 
+    def _number(self, name: str) -> float | None:
+        """A query parameter as a float, or None when absent or unparseable.
+
+        None means "use the configured default", and the plan echoes back the age it
+        actually resolved — so a typo produces a visibly different preview rather than a
+        silent one. Only the read-only planner takes a number this way; the POST that
+        deletes parses its own body and rejects garbage outright.
+        """
+        raw = self._text(name)
+        if raw is None:
+            return None
+        try:
+            return float(raw)
+        except ValueError:
+            return None
+
     def _flag(self, name: str, default: bool | None = None) -> bool | None:
         """Tri-state: absent/``any`` keeps ``default`` (usually None = do not filter)."""
         raw = self._text(name)
@@ -533,6 +762,8 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             if route == "/api/config":
                 self._send_json(*self.app.get_config())
+            elif route == "/api/model":
+                self._send_json(*self.app.get_model())
             elif route == "/api/chunks":
                 self._send_json(*self.app.get_chunks(self._param("t_from"), self._param("t_to")))
             elif route == "/api/index":
@@ -556,6 +787,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json(*self.app.get_monitor_state())
             elif route == "/api/actions":
                 self._send_json(*self.app.get_actions(self._param("t_from"), self._param("t_to")))
+            elif route == "/api/retention":
+                self._send_json(*self.app.get_retention(self._number("older_than_seconds")))
             elif route == "/api/video":
                 self._serve_video()
             elif route == "/api/live.jpg":
@@ -582,8 +815,12 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             if route == "/api/ask":
                 self._send_json(*self.app.post_ask(body))
+            elif route == "/api/model":
+                self._send_json(*self.app.post_model(body))
             elif route == "/api/register_task":
                 self._send_json(*self.app.post_register_task(body))
+            elif route == "/api/retention":
+                self._send_json(*self.app.post_retention(body))
             else:
                 self._send_json(HTTPStatus.NOT_FOUND, {"detail": f"no such endpoint: {route}"})
         except BrokenPipeError:  # pragma: no cover
@@ -898,7 +1135,8 @@ def build_app(
     registry = JobRegistry(deep, resolved)
     chat_log = ChatLog(resolved.chat_log)
     toolbox = Toolbox(store, action_server, registry, resolved)
-    agent = AskAgent(build_backend(resolved), toolbox, chat_log, resolved)
+    source, backend = _startup_source(resolved)
+    agent = AskAgent(backend, toolbox, chat_log, resolved)
 
     task_registry = tasks
     monitor_runner = None
@@ -918,6 +1156,7 @@ def build_app(
         settings=resolved,
         clip_cutter=clip_cutter if clip_cutter is not None else _default_cutter(),
         monitor=monitor_runner,
+        model_source=source,
     )
     if monitor_runner is not None:
         # Push funnel state and each new action to the panes as they happen, over the
@@ -925,6 +1164,30 @@ def build_app(
         monitor_runner._on_state = app.publish_monitor_state  # noqa: SLF001 - same module
         monitor_runner._on_action = app.publish_action  # noqa: SLF001
     return app
+
+
+def _startup_source(settings: AgentSettings) -> tuple[str, Any]:
+    """Resolve ``agent.model_source`` into a backend, falling back to the default.
+
+    A console that will not start because LM Studio happens to be closed is worse than
+    one that starts on the configured model and offers the switch in the topbar — which
+    is where the choice belongs anyway. The fallback is logged, never silent.
+    """
+    source = str(config.get("agent.model_source", DEFAULT_SOURCE) or DEFAULT_SOURCE)
+    if source == DEFAULT_SOURCE:
+        return DEFAULT_SOURCE, build_backend(settings)
+    try:
+        backend = build_source_backend(source, settings)
+    except Exception as exc:  # noqa: BLE001 - any failure means "start on the default"
+        log_event(
+            "agent.model.fallback",
+            requested=source,
+            error=f"{type(exc).__name__}: {exc}",
+            using=DEFAULT_SOURCE,
+        )
+        return DEFAULT_SOURCE, build_backend(settings)
+    log_event("agent.model.selected", source=source, model=backend.model)
+    return source, backend
 
 
 def _build_monitor(actions: ActionServer) -> tuple[TaskRegistry | None, Any | None]:

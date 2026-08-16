@@ -43,6 +43,39 @@
           title="browse the index — every caption, paged (opens a new tab)"
           >index ↗</a
         >
+        <!-- The one control on this page that destroys anything. It opens the panel
+             below rather than deleting on click: the archive is the only thing the deep
+             worker can re-read (invariant 7), so a swept hour is gone for good and the
+             counts belong in front of the decision, not in a toast after it. -->
+        <button
+          type="button"
+          class="pill pill--danger"
+          data-purge
+          title="delete archived footage and its captions older than the retention age"
+        >
+          delete old footage
+        </button>
+        <!-- Which model answers on the Ask surface. Two sources, both already running
+             somewhere: whatever `agent.model` is configured against (on gn100-2f74 that
+             is Nemotron 3.5 Lightning in the box's own vLLM container, not a llama-server
+             this repo started), and whatever LM Studio has loaded. The control switches
+             between them; it starts and stops nothing, which is why both being up is a
+             warning and not a mode. -->
+        <div class="model" data-model>
+          <button
+            type="button"
+            class="pill pill--model"
+            data-model-button
+            title="which model is answering"
+          >
+            model…
+          </button>
+          <div class="model-panel" data-model-panel hidden>
+            <div class="model-list" data-model-list></div>
+            <p class="model-note" data-model-note hidden></p>
+            <p class="model-scope muted" data-model-scope></p>
+          </div>
+        </div>
         <span class="pill" data-mode-pill>…</span>
         <span class="pill pill--quiet" data-tz-pill>…</span>
         <span class="pill pill--quiet" data-clock-pill>--:--:--</span>
@@ -50,6 +83,19 @@
     </header>
 
     <div class="banner" data-banner hidden></div>
+
+    <!-- Confirmation for the button above. Full width and directly under the topbar
+         because it is asking about something that cannot be undone — a dropdown or a
+         tooltip would be dismissable by the same stray click that opened it. -->
+    <section class="purge" data-purge-panel hidden>
+      <p class="purge-line" data-purge-summary>…</p>
+      <p class="purge-note muted" data-purge-note></p>
+      <div class="purge-actions">
+        <button type="button" class="btn btn--danger btn--small" data-purge-confirm>delete</button>
+        <button type="button" class="btn btn--quiet btn--small" data-purge-cancel>cancel</button>
+        <button type="button" class="btn btn--small" data-purge-reload hidden>reload the console</button>
+      </div>
+    </section>
 
     <main class="layout">
       <!-- Live camera and archive player sit side by side: what the camera SEES next
@@ -157,7 +203,7 @@
             <summary>+ define a standing task</summary>
             <form data-watch-form>
               <label>
-                <span>task_id</span>
+                <span>task_id <span class="muted">— free text; slugified on register</span></span>
                 <input name="task_id" placeholder="fire-door-blocked" autocomplete="off" />
               </label>
               <label>
@@ -232,6 +278,8 @@
     <script src="static/ask.js" defer></script>
     <script src="static/watch.js" defer></script>
     <script src="static/timeline.js" defer></script>
+    <script src="static/retention.js" defer></script>
+    <script src="static/model.js" defer></script>
     <script src="static/app.js" defer></script>
   </body>
 </html>

@@ -138,7 +138,7 @@ Hard settings on the live path:
 | Setting | Value | Why |
 |---|---|---|
 | `enable_reasoning` | **false** | A CoT caption is 1000+ tokens → 60 s+/chunk. Non-negotiable. |
-| `max_tokens` | **80** | Two tight sentences. Decode is ~95% of cost; this is the dial. |
+| `max_tokens` | **320** (was 80) | Decode is ~95% of cost and this is the dial — but measured on this model, 80 bought less than it looked: 97% of captions spent a quarter of their words describing the burned-in clock, and raising the cap alone changed nothing (the model stops when the prompt is satisfied). A caption with real detail costs 2.51 s; the gate's ~78% skip makes that 0.55 s per 4 s stride. See CLAUDE.md invariant 6. |
 | Model | smallest viable Cosmos 3 variant | ~4× decode speed vs 8B. See open decision D1. |
 | Precision | bf16 | Quantized Cosmos Reason variants are documented to hallucinate. |
 | Batch | 1 in practice | **But the API must take a list.** See §8. |

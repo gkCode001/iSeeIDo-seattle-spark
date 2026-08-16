@@ -14,6 +14,33 @@ paths:
   chat_log: data/chats.jsonl     # chat turns + job refs, SPEC §11.4
 
 # --------------------------------------------------------------------------------------
+# Retention — the "delete footage and captions older than N" sweep (the topbar button)
+# --------------------------------------------------------------------------------------
+# This is the one operation in the system that destroys evidence, and nothing undoes it:
+# the archive is the ONLY thing the deep worker can re-read (invariant 7), so a swept
+# hour is an hour that can never be re-analysed, only remembered through whatever caption
+# survived. Hence a plan/apply split rather than a single call — the button shows what it
+# is about to destroy, with real counts, before anything is unlinked.
+#
+# Disk is not the reason to use it. At ~22 GB/day measured (CLAUDE.md) against 3.3 TB
+# free, the archive is not close to a problem; this exists so a rehearsal can be reset
+# and a demo can start from a known-empty history.
+retention:
+  max_age_seconds: 10800         # 3 hours — what the button offers by default
+  # A floor on what any request may ask for, whatever the caller says. The recent past is
+  # where the live window, ingest's backlog and any in-flight deep job all live; a sweep
+  # that reaches into it deletes the footage the next question is about.
+  min_age_seconds: 900           # 15 minutes
+  # Never unlink the file ffmpeg currently has open — that takes the recorder's mp4
+  # finalisation with it, and a hard-killed segment is undecodable for every window
+  # overlapping it (CLAUDE.md). The newest segment on disk is always kept, as is anything
+  # modified within this many segment lengths of now.
+  live_segment_guard_segments: 2
+  # Evidence clips under `paths.clips` are deliberately NOT swept. They are what SPEC
+  # §6.4's "why did you alert at 21:11?" renders from, the action log that references
+  # them is append-only, and they are megabytes against the archive's gigabytes.
+
+# --------------------------------------------------------------------------------------
 # Recorder — SPEC §2.1
 # --------------------------------------------------------------------------------------
 recorder:
@@ -116,6 +143,22 @@ recorder:
 # Ingest — SPEC §2.2 / §2.3 / §2.4
 # --------------------------------------------------------------------------------------
 ingest:
+  # Task-aware captioning. The caption is the only substrate M5 detection has, so the
+  # active standing tasks are appended to the caption prompt as an explicit checklist.
+  # See services/ingest/watchlist.py. Set `enabled: false` to go back to a purely
+  # general caption — Ask is unaffected either way, Watch gets markedly worse.
+  watchlist:
+    enabled: true
+    # Written by whoever owns task CRUD (the agent server), polled by mtime here, because
+    # M1 and M5 are separate processes and runtime task registrations live in neither's
+    # config file. Falls back to `monitor.tasks_file` when absent, so a box that has
+    # never opened the UI still gets a task-aware caption from the cold-start seed.
+    path: data/watchlist.json
+    # The prompt grows one line per task and prefill stops being free eventually. Tasks
+    # past this cap steer no captions at all, so the truncation is logged loudly rather
+    # than applied quietly.
+    max_items: 8
+
   window_seconds: 5              # latency floor is "wait for the window to close"
   stride_seconds: 4              # 1 s overlap so a boundary event is not halved
   sample_fps: 1                  # -> 5 frames per window
@@ -214,11 +257,50 @@ vlm:
   prompts:
     # Caption text lives here so M1 and the rollup job cannot drift to different
     # prompts and quietly produce two incomparable caption styles in one index.
+    # Measured on 1,149 live captions before this wording: 98% of them described the
+    # burned-in clock, spending a median 10 of 42 words — a QUARTER of the budget — on
+    # narrating our own overlay, while only 25% mentioned an action at all. The overlay
+    # exists so the MODEL can read it for temporal localization (invariant 8); the index
+    # already stores exact t_start/t_end, so citing it back is pure waste. The old line
+    # "If a timestamp is burned into the frame, cite it" is what caused it.
+    #
+    # Raising max_tokens was the alternative and is the worse trade: decode is ~95% of
+    # cost (SPEC §2.4), so 80 -> 160 tokens roughly doubles caption latency and halves
+    # the headroom the deep worker shares. Recovering the wasted quarter is free.
     caption: >-
-      Describe what is happening in this scene in at most two short sentences.
-      State the objects, people and vehicles present and what they are doing.
-      If a timestamp is burned into the frame, cite it. Report only what is
-      visible; do not speculate about intent.
+      Describe this moment in four to six sentences. Be specific and concrete — this
+      text is the ONLY record of the moment once the window closes, and a later search
+      has nothing else to match on.
+      (1) The people: how many, and for EACH of them what they are doing, what they are
+      holding or touching, and where they are looking.
+      (2) What they are wearing: colours and distinctive items.
+      (3) The objects and surroundings that matter — furniture, screens, doors,
+      vehicles — and where people are relative to them.
+      (4) What CHANGES across the frames: who moves, what enters or leaves, what is
+      picked up or put down. Say explicitly if nothing moves.
+      No preamble: do not open with "This image", "The scene shows" or "appears to be".
+      Do NOT describe or quote the timestamp burned into the frame.
+      Report only what is visible; do not speculate about intent or identity.
+
+    # Appended to `caption` above when standing tasks are active — see
+    # services/ingest/watchlist.py for why. Short story: M5 stage 1 is a cosine against
+    # the caption and stage 2 re-reads the caption, so neither ever sees a pixel. A
+    # detail the caption omits is a task that can never fire. Rather than hope a general
+    # caption mentions the right noun, ask for it.
+    #
+    # The last line is load-bearing. Naming a thing to look for biases the model toward
+    # reporting it; "only if you can actually see it" plus stage 2's re-read and stage 3's
+    # 4 fps re-watch are what keep that from becoming a false alert. Deleting that line
+    # turns the checklist into a suggestion box.
+    #
+    # Costs prefill, not decode. SPEC §2.5: prefill ~5% of per-chunk cost, so this does
+    # not touch the 320-token output budget below.
+    watchlist_preamble: >-
+      Then add a final line starting "WATCHING:" that states, for each item below,
+      whether it is present in these frames. Name the item and answer present or absent.
+      Say present ONLY if you can actually see it — a guess here triggers a real alert.
+      Items:
+
     deep: >-
       Watch this footage closely and answer the question. Cite the burned-in
       timestamps for anything you report. If the footage does not show enough
@@ -227,7 +309,23 @@ vlm:
   profiles:
     live:
       enable_reasoning: false    # a CoT caption is 1000+ tokens -> 60 s+/chunk
-      max_tokens: 80             # decode is ~95% of cost; this is THE dial
+      # Raised from 80 on 2026-08-15, deliberately and with measurements — see
+      # CLAUDE.md invariant 6, which this supersedes for THIS model. Measured on real
+      # 1080p webcam frames, four identical windows:
+      #
+      #   cap   latency   tokens produced   truncated
+      #    80    0.77 s        65             0/4      <- the cap was not the limit
+      #   160    0.66 s        65             0/4
+      #   320    2.51 s       124             0/4      <- with the fuller prompt below
+      #
+      # The cap alone changes nothing: the model stops when the PROMPT is satisfied.
+      # What costs latency is asking for more, and that cost is affordable here —
+      # 2.51 s per captioned window against a 4 s stride, and the detector gate skips
+      # ~78%, so the effective load is 0.55 s per stride (14% duty cycle).
+      #
+      # If the gate's skip rate ever falls below ~40%, this is the first number to put
+      # back: at 2.5 s a caption, real-time needs most windows to be skipped.
+      max_tokens: 320
       temperature: 0.0
       request_timeout_seconds: 30   # expected ~2 s. Anything near this is pathological.
     deep:
@@ -326,6 +424,15 @@ agent:
     chat_template_kwargs:
       enable_thinking: false
   max_tokens: 512
+  # Which of the two model sources the console's topbar selector starts on:
+  #   default  -> agent.backend/endpoint/model above, i.e. `make serve`'s llama-server
+  #   lmstudio -> whatever model LM Studio currently has loaded (see the block at the
+  #               bottom of this file)
+  # The selector rebinds the ASK surface only. M1's captioner runs in the ingest process
+  # and keeps talking to vlm.endpoint whatever this says — a web page cannot reach into
+  # another process, and pretending otherwise would put the two surfaces on different
+  # models without saying so.
+  model_source: default          # default | lmstudio
   host: 0.0.0.0
   port: 8080
   groundedness_gate: true        # SPEC §4.2 — retrieval distance is NOT confidence
@@ -333,7 +440,18 @@ agent:
   temperature: 0.0
   ui_dir: ui
   search:
-    default_lookback_seconds: 86400
+    # The ask surface is asked about NOW. Answering from the whole day lets a caption
+    # from hours ago outrank the last few minutes on a lexical tie, and the answer looks
+    # confidently wrong rather than absent — the user asks "what is happening" and gets
+    # this morning.
+    default_lookback_seconds: 1800        # 30 minutes
+    # Used only after the user says yes to looking further back. Widening is offered,
+    # never assumed: re-watching an hour of footage is the expensive path (SPEC §5), and
+    # a system that silently reaches for it turns "I don't know" into a 90 s wait.
+    extended_lookback_seconds: 86400      # 24 hours
+    # Ask before widening. Set false to go straight to the old behaviour — search the
+    # extended window and escalate without a prompt.
+    confirm_before_widening: true
   chunks:
     lookback_seconds: 3600
     max: 500
@@ -349,7 +467,23 @@ agent:
   actions:
     lookback_seconds: 86400
   history:
-    max_turns: 200
+    max_turns: 200               # how many turns GET /api/chat/history replays to the page
+
+    # How many PRIOR turns the model sees. Without this every turn is independent, and a
+    # follow-up — "what were they wearing?" after "is anyone at the door?" — has no idea
+    # who "they" is: it re-retrieves from scratch against a pronoun and answers whatever
+    # the ANN happens to return.
+    #
+    # Small on purpose. Prior turns are prefill on EVERY call, and there are two calls a
+    # turn (gate + answer). 3 turns of question plus a clipped answer is roughly 400-600
+    # tokens; going to 10 would cost more prefill than the 5 retrieved captions do.
+    # 0 disables it and restores the old stateless behaviour.
+    context_turns: 3
+
+    # Prior answers are clipped to this before going in. An answer can be 512 tokens and
+    # the useful part for resolving a reference is the first sentence or two — carrying
+    # all of it crowds out the captions, which are the actual evidence.
+    context_answer_chars: 400
   ws:
     ping_interval_seconds: 25.0  # a silent WebSocket dies to an idle proxy; this keeps
                                  # the refinement channel open across a 90 s deep job
@@ -363,11 +497,18 @@ agent:
       YES means: everything the question asks for is stated in the context.
       NO means: answering would require looking at the footage again.
       Do not answer the question itself.
+    # "Two or three sentences. No preamble." was not enough. `--reasoning off` stops
+    # this model emitting reasoning_content, but it is still a thinking model — so the
+    # thinking RELOCATES into the answer, and the user gets "The user is asking if any
+    # person was raising a hand. I need to examine the five captions... 1. ... 2. ..."
+    # truncated mid-list by max_tokens. Naming the specific failures is what stopped it;
+    # measured 2 leaks in 3 questions before, 0 after.
     answer: |
       You answer questions about recorded video using retrieved captions.
       Cite the wall-clock times of what you report, and label them UTC — the captions' timestamps are UTC.
       State plainly when the captions do not record what was asked rather than guessing; a request_deep_analysis call is the correct response to fine visual detail.
-      Two or three sentences. No preamble.
+      Answer the question in your FIRST sentence. Never restate the question, never narrate what you are about to do, and never list the captions back — the user can already see them.
+      Two or three sentences. No preamble, no numbered lists.
 
   stub:
     # Fraction of the question's content words that must appear in the retrieved
@@ -411,7 +552,20 @@ agent:
 # --------------------------------------------------------------------------------------
 monitor:
   tasks_file: config/tasks.yaml
-  stage1_cosine_threshold: 0.35  # deliberately loose — over-trigger here, filter later
+  # Deliberately loose — over-trigger here, filter later (SPEC §6.2). 0.35 was NOT loose
+  # against `index.embed.backend: hashing`, which is bag-of-words: it scores literal word
+  # overlap diluted by caption length, so "a red band is visible on the wrist" scored
+  # 0.18 against a task describing exactly that, and "red wristbands" scored 0.07 because
+  # `wristband` and `band` are simply different tokens. Measured over 600 captioned
+  # windows of real footage, describe "a person wearing a red wristband":
+  #   0.35 -> caught 1 of 23 true events, 0 false positives
+  #   0.20 -> caught 9 of 23,             0 false positives
+  #   0.15 -> caught 12 of 23,            4 of 577 (1%) false positives
+  #   0.10 -> caught 14 of 23,           50 of 577 (9%) false positives
+  # 0.15 buys half the recall for 1% leakage, which is precisely what stage 2's LLM is
+  # there to reject. RAISE THIS BACK toward 0.35 if `embed.backend` ever becomes `nim` —
+  # a real semantic embedder separates these classes far better and this would be slack.
+  stage1_cosine_threshold: 0.15
   stage2_sustain_default: 120
   default_cooldown_seconds: 300
   dedupe_overlap_seconds: 5      # consecutive chunks share 1 s and double-report
@@ -447,11 +601,52 @@ monitor:
 # UI — SPEC §11
 # --------------------------------------------------------------------------------------
 ui:
-  display_timezone: Asia/Kolkata # the ONLY place local time is allowed (SPEC §11.5)
+  display_timezone: America/Los_Angeles # the ONLY place local time is allowed (SPEC §11.5)
   time_format: "%H:%M:%S"
   poll_interval_ms: 1000
   # SPEC §11.1 / CLAUDE.md invariant 10 — the demo runs with the network off.
   vendored_assets_only: true
+
+# --------------------------------------------------------------------------------------
+# LM Studio — the OTHER model source the console's topbar selector can switch M3 onto.
+# --------------------------------------------------------------------------------------
+# `make serve` starts our own llama-server on 8000 using the CUDA-13 ARM64 binary that
+# LM Studio ships. This block is for the opposite arrangement: LM Studio is already
+# running with a model loaded, and we borrow it. That is the cheap way to A/B a candidate
+# model — load it in the GUI, pick "LM Studio" in the topbar, ask the same question twice
+# — with no second copy in our model dir.
+#
+# It does NOT relax invariant 1. Selecting LM Studio changes which endpoint M3 talks to;
+# it cannot stop the server `make serve` started. If both are up, both are resident and
+# both are eating the 128 GB budget — /api/model reports that and the topbar says so.
+lmstudio:
+  endpoint: http://localhost:1234/v1    # LM Studio's default local-server port
+
+  # null = use whatever model is loaded, which is the point of this option: no filename
+  # to keep in sync with the GUI. Pin an id here to require a specific one.
+  model: null
+
+  # The ask surface is text-only, so a text model is fine here. Set true if you ever
+  # point the CAPTIONER at LM Studio — without a vision projector it fails on frame one.
+  require_vision: false
+
+  # A 1080p frame costs ~261 prompt tokens, so the deep path's 25 s at 4 fps is ~26k.
+  # LM Studio loads whatever its GUI slider says; below this a deep request returns
+  # HTTP 400, which reaches the UI as a job that never completes (see agent.deep).
+  min_context_tokens: 32768
+
+  resolve_timeout_seconds: 5            # one GET against localhost; the UI waits on it
+
+  # `--reasoning off --reasoning-budget 0` is a LAUNCH flag, and we are not the launcher.
+  # gemma-4 is a thinking model: left on it spends the whole budget inside
+  # reasoning_content and returns an EMPTY answer with finish_reason=length. These fields
+  # are merged into every request body to make the same switch per-request. Which spelling
+  # a given llama.cpp/LM Studio build honours is a build detail, so send both and keep
+  # them here rather than in code — an unknown field is ignored, a missing one is not.
+  reasoning_off_payload:
+    reasoning_format: none
+    chat_template_kwargs:
+      enable_thinking: false
 
 # --------------------------------------------------------------------------------------
 # Doctor — `make doctor` checks this box against the CLAUDE.md machine-state table.
