@@ -756,7 +756,23 @@ mcp:
 # Monitor — SPEC §6
 # --------------------------------------------------------------------------------------
 monitor:
+  # The COLD-START seed: what a box with no task store yet begins with. Source, in git.
   tasks_file: config/tasks.yaml
+  # The LIVE task set, rewritten on every register / edit / delete / enable-toggle, and
+  # what the monitor restores from on boot. Runtime state, gitignored.
+  #
+  # It exists because a task registered through the Watch pane used to live only in the
+  # agent's memory: any restart rebuilt the registry from the seed alone and the task was
+  # gone, silently — the pane simply showed fewer cards. Measured on this box: a
+  # notify_discord task for a person holding a weapon vanished on a restart made for an
+  # unrelated reason.
+  #
+  # Once this file exists it is the WHOLE truth, not a supplement to the seed. Merging
+  # the seed back in on every boot would resurrect a task that was deliberately deleted,
+  # which is the same bug pointed the other way. So: editing tasks.yaml on a box that
+  # already has a store does nothing until the store is deleted, and the monitor logs
+  # which source it loaded from on every start.
+  tasks_store: data/tasks.json
   # Deliberately loose — over-trigger here, filter later (SPEC §6.2). 0.35 was NOT loose
   # against `index.embed.backend: hashing`, which is bag-of-words: it scores literal word
   # overlap diluted by caption length, so "a red band is visible on the wrist" scored

@@ -81,6 +81,7 @@ class MonitorSettings:
 
     # --- task registry ------------------------------------------------------------
     tasks_file: Path
+    tasks_store: Path
 
     # --- stage 1: embedding match (SPEC §6.2) -------------------------------------
     stage1_cosine_threshold: float
@@ -125,6 +126,7 @@ class MonitorSettings:
         """Build from ``config/settings.yaml``. Every existing key is required."""
         return cls(
             tasks_file=config.repo_path("monitor.tasks_file"),
+            tasks_store=config.repo_path("monitor.tasks_store"),
             stage1_cosine_threshold=float(config.get("monitor.stage1_cosine_threshold")),
             stage2_sustain_default=int(config.get("monitor.stage2_sustain_default")),
             # Same key M3 reads. Two surfaces, one LLM decision — a monitor confirming

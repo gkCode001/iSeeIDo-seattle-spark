@@ -47,3 +47,7 @@ demo_videos/
 # them from the process environment only (services/mcp/alertbridge.py).
 .env.local
 .env
+
+# The live standing-task set (monitor.tasks_store). Runtime state: rewritten on every
+# task change, restored on boot. config/tasks.yaml is the source-controlled seed.
+data/tasks.json

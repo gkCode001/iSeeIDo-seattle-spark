@@ -796,9 +796,12 @@ def build_monitor(
     """
     resolved = settings or MonitorSettings.from_config()
     embedder = build_embedder(IndexSettings.from_config())
-    registry = TaskRegistry(embedder)
+    registry = TaskRegistry(embedder, store_path=resolved.tasks_store)
     if load_seed:
-        registry.load_seed(resolved.tasks_file)
+        # Store first, seed only when there is no store — see TaskRegistry.load. A task
+        # registered through the UI has to survive a restart, and a task deleted from
+        # the seed has to stay deleted.
+        registry.load(resolved.tasks_file)
     action_server = actions or ActionServer(clock=clock)
     _preflight_external_actions(registry, action_server)
     return Monitor(

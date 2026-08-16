@@ -21,7 +21,10 @@ window should fail the POST that created it, in front of the person who typed it
 
 from __future__ import annotations
 
+import json
 import logging
+import os
+import tempfile
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
@@ -96,10 +99,13 @@ class TaskRegistry:
     take a lock it does not need.
     """
 
-    def __init__(self, embedder: Embedder) -> None:
+    def __init__(self, embedder: Embedder, store_path: str | Path | None = None) -> None:
         self._embedder = embedder
         self._tasks: dict[str, Task] = {}
         self._windows: dict[str, ActiveWindow] = {}
+        #: Where the live task set is persisted, or None for a registry that forgets
+        #: (tests, and the one-shot tools that never mutate). See :meth:`load`.
+        self._store_path = Path(store_path) if store_path is not None else None
 
     # ----------------------------------------------------------------------------------
     # Registration
@@ -113,6 +119,95 @@ class TaskRegistry:
             extra={"fields": {"tasks_file": str(path), "count": len(registered)}},
         )
         return registered
+
+    def load(self, seed_path: str | Path) -> list[Task]:
+        """Restore the live task set: the persisted store if there is one, else the seed.
+
+        A task registered through the UI used to live only in this dict. Any restart —
+        a crash, a config edit, a deploy, someone fixing an unrelated bug — rebuilt the
+        registry from ``config/tasks.yaml`` alone and the task was simply gone. That
+        failure is silent in the worst way: the Watch pane shows fewer cards, and a task
+        the operator believes is armed is not watching anything. Measured on this box: a
+        `notify_discord` task for a person holding a weapon disappeared on an agent
+        restart made for an unrelated reason.
+
+        **The store, once it exists, is the whole truth.** Not "seed plus store": a task
+        deleted from a seeded set has to STAY deleted, and merging the seed back in on
+        every boot would resurrect it — the same bug in the other direction. So the seed
+        is what a box with no store yet starts from, and after that the store is
+        authoritative. Editing ``config/tasks.yaml`` on a box that already has one
+        therefore does nothing; delete the store to go back to the seed, and the log line
+        below says which source was used so that is discoverable rather than mysterious.
+
+        Embeddings are recomputed rather than persisted. They are derived from
+        ``describe`` by whatever embedder is configured now, and a stored vector from a
+        different backend would match nothing while looking perfectly valid.
+        """
+        rows = self._read_store()
+        if rows is None:
+            registered = self.load_seed(seed_path)
+            self._save()
+            return registered
+        registered: list[Task] = []
+        for row in rows:
+            try:
+                registered.append(self.register(row))
+            except Exception as exc:  # noqa: BLE001 - one bad row, not one dead monitor
+                logger.warning(
+                    "skipping unreadable stored task",
+                    extra={"fields": {"row": str(row)[:200], "error": repr(exc)}},
+                )
+        logger.info(
+            "task store loaded",
+            extra={"fields": {"store": str(self._store_path), "count": len(registered)}},
+        )
+        return registered
+
+    def _read_store(self) -> list[Mapping[str, Any]] | None:
+        """Rows from the store, or None when there is no store to read."""
+        if self._store_path is None or not self._store_path.is_file():
+            return None
+        try:
+            payload = json.loads(self._store_path.read_text(encoding="utf-8"))
+            rows = payload.get("tasks") if isinstance(payload, dict) else payload
+            return list(rows) if isinstance(rows, list) else None
+        except (OSError, ValueError) as exc:
+            # A corrupt store must not take the monitor down, and must not silently
+            # fall through to the seed either — that is how a deleted task comes back.
+            logger.error(
+                "task store is unreadable; starting with NO tasks. Fix or delete it.",
+                extra={"fields": {"store": str(self._store_path), "error": repr(exc)}},
+            )
+            return []
+
+    def _save(self) -> None:
+        """Write the live set. Called by every mutation; never raises at the caller."""
+        if self._store_path is None:
+            return
+        payload = {
+            "tasks": [
+                {k: v for k, v in task.to_dict().items() if k != "embedding"}
+                for task in self._tasks.values()
+            ]
+        }
+        try:
+            self._store_path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=str(self._store_path.parent), suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    json.dump(payload, fh, indent=2, sort_keys=True)
+                os.replace(tmp, self._store_path)
+            except BaseException:
+                Path(tmp).unlink(missing_ok=True)
+                raise
+        except OSError as exc:
+            # Losing the write is bad; losing the registration because the write failed
+            # is worse. The task is live either way, and this is the line that says the
+            # next restart will not have it.
+            logger.error(
+                "could not persist tasks; this set will NOT survive a restart",
+                extra={"fields": {"store": str(self._store_path), "error": repr(exc)}},
+            )
 
     def register(self, task: Task | Mapping[str, Any]) -> Task:
         """Validate, embed ``describe`` once, and store. SPEC §6.2 stage 1 depends on it.
@@ -157,6 +252,7 @@ class TaskRegistry:
                 }
             },
         )
+        self._save()
         return stored
 
     def _validate(self, task: Task) -> None:
@@ -212,6 +308,7 @@ class TaskRegistry:
         if task is None:
             raise KeyError(f"no such task: {task_id!r}")
         self._windows.pop(task_id, None)
+        self._save()
         logger.info("task removed", extra={"fields": {"task_id": task_id}})
         return task
 
@@ -246,9 +343,12 @@ class TaskRegistry:
         try:
             return self.register(merged)
         except Exception:
-            # Put the original back: a rejected edit must not delete the task.
+            # Put the original back: a rejected edit must not delete the task. Persist
+            # the restoration as well — a store left describing the half-applied edit
+            # would resurrect it on the next boot.
             self._tasks[task_id] = current
             self._windows[task_id] = parse_active_window(current.active)
+            self._save()
             raise
 
     def window_for(self, task_id: str) -> ActiveWindow:
@@ -265,6 +365,7 @@ class TaskRegistry:
             raise KeyError(f"no such task: {task_id!r}")
         updated = replace(task, enabled=bool(enabled))
         self._tasks[task_id] = updated
+        self._save()
         logger.info(
             "task enabled state changed",
             extra={"fields": {"task_id": task_id, "enabled": updated.enabled}},
