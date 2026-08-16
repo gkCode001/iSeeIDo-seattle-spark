@@ -102,11 +102,32 @@ green "  preflight ok"
 # started by systemd and docker, never by us.
 step "Model servers (VLM :$VLM_PORT, ask LLM :$LLM_PORT)"
 MODELS_DOWN=0
-curl -sf -o /dev/null "http://127.0.0.1:$VLM_PORT/v1/models" 2>/dev/null \
-    || { red "  VLM not answering on :$VLM_PORT      fix: sudo systemctl start gn100-vlm"; MODELS_DOWN=1; }
+STRANDED=0
+if ! curl -sf -o /dev/null "http://127.0.0.1:$VLM_PORT/v1/models" 2>/dev/null; then
+    MODELS_DOWN=1
+    # A dark port does not mean the unit is down, and the difference decides the fix.
+    # gn100-vlm runs with `--network container:nemoclaw-vllm`, so it owns no network
+    # stack. Recreating nemoclaw-vllm destroys the namespace the VL is living in: the VL
+    # keeps running, systemd still reports `active`, and only the port goes dark. There
+    # is no failure for Restart=on-failure to catch. `systemctl start` on an already
+    # active unit is a no-op, so suggesting it here sends you in circles — the stranded
+    # process has to be restarted to re-join the current namespace.
+    if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet gn100-vlm 2>/dev/null; then
+        STRANDED=1
+        red "  VLM not answering on :$VLM_PORT      but gn100-vlm is active — stranded netns"
+        red "                                       fix: sudo systemctl restart gn100-vlm"
+    else
+        red "  VLM not answering on :$VLM_PORT      fix: sudo systemctl start gn100-vlm"
+    fi
+fi
 curl -sf -o /dev/null "http://127.0.0.1:$LLM_PORT/v1/models" 2>/dev/null \
     || { red "  ask LLM not answering on :$LLM_PORT   fix: docker start nemoclaw-vllm"; MODELS_DOWN=1; }
 if [ "$MODELS_DOWN" = 1 ]; then
+    [ "$STRANDED" = 1 ] && red "
+The VL unit is up but unreachable, which means nemoclaw-vllm was restarted underneath
+it and took the shared network namespace with it. Restarting gn100-vlm re-joins the
+namespace that exists now. Confirm :$LLM_PORT is answering FIRST — restarting the VL
+against a missing nemoclaw-vllm just strands it again."
     die "
 The model servers are this box's own containers; this script does not start them and
 must not start one of its own. Bring the missing one up, WARM IT (the VL's first request
