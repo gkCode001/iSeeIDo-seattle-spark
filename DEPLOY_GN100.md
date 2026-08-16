@@ -63,6 +63,17 @@ tried first and does NOT parse it (the call leaks into the answer as raw text).
   (`--network container:nemoclaw-vllm`). Touching `nemoclaw-vllm` therefore
   kills the VL's networking. Order is always: `systemctl stop gn100-vlm` →
   recreate/restart `nemoclaw-vllm` → wait for :8000 → `systemctl start gn100-vlm`.
+
+  Get the order wrong and the VL is *stranded*: the process stays alive, the unit
+  still reports `active`, `docker ps` still says `Up`, and nothing can reach :8082.
+  `restart: unless-stopped` on `nemoclaw-vllm` means docker can do this to you on
+  its own — a crash or a daemon restart is enough. Since 2026-08-16 the box runs
+  **`gn100-vlm-netns-guard.service`** (script at `/usr/local/bin/gn100-vlm-netns-guard`),
+  which watches `docker events` for `nemoclaw-vllm` starting, waits for :8000 to
+  answer, and only then restarts `gn100-vlm`. It decides by comparing the two
+  containers' start times, so a VL that is merely still loading weights is left
+  alone. Its log is `journalctl -u gn100-vlm-netns-guard`. Recovery is still a VL
+  restart, so budget the ~26 s cold start after it fires.
 - **Cold-start latency lies.** The VL's first caption after a restart takes
   ~26 s; warm it is 2–3 s. Send one throwaway request before believing any
   latency number, and after every model-server restart.
