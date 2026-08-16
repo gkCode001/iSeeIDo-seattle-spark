@@ -112,10 +112,31 @@ if ! curl -sf -o /dev/null "http://127.0.0.1:$VLM_PORT/v1/models" 2>/dev/null; t
     # is no failure for Restart=on-failure to catch. `systemctl start` on an already
     # active unit is a no-op, so suggesting it here sends you in circles — the stranded
     # process has to be restarted to re-join the current namespace.
+    #
+    # But `active` alone does NOT mean stranded, and getting this wrong is worse than
+    # not checking. Type=simple, so the unit goes active the moment `docker run` is
+    # exec'd — ~60 s before vLLM finishes loading weights and binds the port. That is
+    # exactly the state you are in right after running the `start` we just advised, and
+    # telling someone to restart a model that is still loading loops forever.
+    #
+    # The two look identical from outside, so compare start times instead: the VL can
+    # only be inside nemoclaw's namespace if it joined AFTER nemoclaw came up. Started
+    # before it => the namespace it holds is a dead one. Docker stamps both as RFC 3339
+    # UTC with fixed-width nanoseconds, so a lexical compare is an ordering compare.
     if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet gn100-vlm 2>/dev/null; then
-        STRANDED=1
-        red "  VLM not answering on :$VLM_PORT      but gn100-vlm is active — stranded netns"
-        red "                                       fix: sudo systemctl restart gn100-vlm"
+        VL_STARTED="$(docker inspect -f '{{.State.StartedAt}}' gn100-vlm 2>/dev/null || true)"
+        NC_STARTED="$(docker inspect -f '{{.State.StartedAt}}' nemoclaw-vllm 2>/dev/null || true)"
+        if [ -n "$VL_STARTED" ] && [ -n "$NC_STARTED" ] && [[ "$VL_STARTED" < "$NC_STARTED" ]]; then
+            STRANDED=1
+            red "  VLM not answering on :$VLM_PORT      gn100-vlm is active but started before"
+            red "                                       nemoclaw-vllm — stranded netns"
+            red "                                       fix: sudo systemctl restart gn100-vlm"
+        else
+            red "  VLM not answering on :$VLM_PORT      gn100-vlm is active and its namespace"
+            red "                                       looks current — probably still loading"
+            red "                                       weights (~60 s). Wait, then re-run."
+            red "                                       Do NOT restart it; that starts over."
+        fi
     else
         red "  VLM not answering on :$VLM_PORT      fix: sudo systemctl start gn100-vlm"
     fi
