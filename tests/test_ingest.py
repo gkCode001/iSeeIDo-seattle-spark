@@ -125,6 +125,14 @@ def make_settings(**overrides: Any) -> IngestSettings:
         overlay_max_fontsize=64,
         vlm_backend="stub",
         caption_prompt="Describe what is happening in this scene.",
+        # Off by default here: these are behaviour tests over the caption path, and a
+        # checklist read from a real config file would make them depend on whatever
+        # standing tasks happen to exist. tests/test_watchlist.py covers it on its own.
+        watchlist_enabled=False,
+        watchlist_path=Path("/nonexistent/watchlist.json"),
+        watchlist_seed_path=Path("/nonexistent/tasks.yaml"),
+        watchlist_preamble="",
+        watchlist_max_items=8,
         caption_timeout_seconds=30.0,
         poll_interval_seconds=1.0,
         bench_target_seconds=4.0,

@@ -692,6 +692,77 @@ class TestPersistence(unittest.TestCase):
                 self.assertEqual(top.record.pts_offset, EVENT_PTS)
 
 
+class TestDeletion(unittest.TestCase):
+    """``select_before`` / ``delete`` — the index half of the retention sweep.
+
+    The only writes in this module that remove anything. ``services/retention.py`` owns
+    the policy (what is old, what the recorder still has open); these tests own the
+    mechanics, and in particular that the persisted corpus every other process reads is
+    left consistent rather than merely smaller in memory.
+    """
+
+    def test_select_before_is_t_end_not_overlap(self) -> None:
+        """Retrieval widens at a boundary because a missed hit is a bad answer. Deletion
+        narrows at the same boundary because an over-eager one does not come back."""
+        store = make_store()
+        store.insert(corpus())
+        # Every window is 5 s; the one at offset 4.0 runs 4.0 → 9.0.
+        cutoff = SEGMENT_START + timedelta(seconds=9)
+
+        selected = set(store.select_before(cutoff))
+
+        straddler = chunk_id_for(
+            CAMERA, SEGMENT_START + timedelta(seconds=7), SEGMENT_START + timedelta(seconds=12)
+        )
+        ends_exactly_on_it = chunk_id_for(
+            CAMERA, SEGMENT_START + timedelta(seconds=4), SEGMENT_START + timedelta(seconds=9)
+        )
+        self.assertIn(ends_exactly_on_it, selected)
+        self.assertNotIn(straddler, selected)
+
+    def test_gated_rows_are_selected_too(self) -> None:
+        """They are the skip-rate denominator (SPEC §2.3). Leaving them behind would have
+        the health metric reporting on a corpus that is no longer there."""
+        store = make_store()
+        store.insert(corpus())
+        store.insert(gated_chunks(3))
+        everything = SEGMENT_START + timedelta(days=1)
+
+        self.assertEqual(len(store.select_before(everything)), len(corpus()) + 3)
+
+    def test_delete_removes_from_both_partitions(self) -> None:
+        store = make_store()
+        store.insert(corpus())
+        store.insert(gated_chunks(3))
+        doomed = store.select_before(SEGMENT_START + timedelta(days=1))
+
+        self.assertEqual(store.delete(doomed), len(doomed))
+
+        counts = store.stats()
+        self.assertEqual(counts.total, 0)
+        self.assertEqual(store.search("white van reversing at the loading door"), [])
+
+    def test_deleting_an_absent_id_is_not_an_error(self) -> None:
+        """The sweep can run twice — the button can be clicked twice."""
+        store = make_store()
+        store.insert([event_chunk()])
+        self.assertEqual(store.delete([event_chunk().chunk_id]), 1)
+        self.assertEqual(store.delete([event_chunk().chunk_id]), 0)
+
+    def test_a_deletion_reaches_the_persisted_corpus(self) -> None:
+        """index.jsonl is how M3 and M5 see what ingest wrote. A delete that lived only
+        in this process would come back on the next reader's reload."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "index.jsonl"
+            with make_store(path=path) as store:
+                store.insert(corpus())
+                store.delete([event_chunk().chunk_id])
+
+            with make_store(path=path) as reopened:
+                self.assertEqual(reopened.fetch([event_chunk().chunk_id]), [])
+                self.assertEqual(reopened.stats().captioned, len(corpus()) - 1)
+
+
 class TestBrowse(unittest.TestCase):
     """Listing the index — what the /api/index browser pages through.
 

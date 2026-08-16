@@ -17,6 +17,10 @@
   "recorder": {
     "segment_seconds": 60
   },
+  "retention": {
+    "max_age_seconds": 10800,
+    "min_age_seconds": 900
+  },
   "ingest": {
     "window_seconds": 5,
     "stride_seconds": 4,

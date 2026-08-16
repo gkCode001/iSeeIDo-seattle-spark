@@ -386,6 +386,52 @@ class TestStandingTaskForm(unittest.TestCase):
         self.assertIn("reset()", close)
 
 
+class TestRetentionControl(unittest.TestCase):
+    """The delete-old-footage button — the only control on this page that destroys data.
+
+    Structural assertions, like the standing-task form's above: there is no JS runner
+    here, so what is pinned is the shape that makes the control safe. Each of these has
+    failed silently in some other UI at some point — a confirm that got refactored into a
+    one-click action, a destructive control left live against fixtures.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.html = (UI_DIR / "index.html").read_text(encoding="utf-8")
+        cls.js = (UI_DIR / "static" / "retention.js").read_text(encoding="utf-8")
+        cls.data = (UI_DIR / "static" / "data.js").read_text(encoding="utf-8")
+
+    def test_the_button_is_wired_and_shipped(self) -> None:
+        self.assertIn("data-purge", self.html)
+        self.assertIn('src="static/retention.js"', self.html)
+
+    def test_clicking_it_does_not_delete(self) -> None:
+        """The click opens the panel and asks for a plan. Deleting is a second click on a
+        separate button, against counts the operator has now seen."""
+        opener = self.js[self.js.index('refs.button.addEventListener') :][:120]
+        self.assertIn("open", opener)
+        self.assertIn("retentionPlan()", self.js)
+        confirm = self.js[self.js.index("data-purge-confirm") :]
+        self.assertIn("applyRetention", confirm)
+
+    def test_the_confirm_and_the_apply_are_different_buttons(self) -> None:
+        self.assertIn("data-purge-confirm", self.html)
+        self.assertIn("data-purge-cancel", self.html)
+
+    def test_mock_mode_cannot_reach_the_destructive_call(self) -> None:
+        """Every other pane degrades to fixtures. A destructive control that degraded to
+        a scripted success would report deleting footage that was never touched — and the
+        operator would believe it."""
+        self.assertIn("isMock()", self.js)
+        apply_fn = self.data[self.data.index("function applyRetention") :][:400]
+        self.assertIn("isMock()", apply_fn)
+        self.assertIn("reject", apply_fn)
+
+    def test_the_age_is_read_from_config_not_hard_coded(self) -> None:
+        """CLAUDE.md: no magic numbers. The label says what settings.yaml says."""
+        self.assertIn("retention.max_age_seconds", self.js)
+
+
 class TestIndexNavLink(unittest.TestCase):
     """The console links to the index browser, and must not navigate away to get there.
 

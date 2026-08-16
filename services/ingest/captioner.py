@@ -37,6 +37,7 @@ from shared.vlm_client import Profile, ProfileSpec, VLMChunk, VLMClient, VLMResu
 
 from .settings import IngestError, IngestSettings
 from .telemetry import log_event
+from .watchlist import Watchlist
 
 __all__ = [
     "Captioner",
@@ -95,18 +96,41 @@ class VLMCaptioner:
     one index.
     """
 
-    def __init__(self, settings: IngestSettings, client: VLMClient | None = None) -> None:
+    def __init__(
+        self,
+        settings: IngestSettings,
+        client: VLMClient | None = None,
+        watchlist: Watchlist | None = None,
+    ) -> None:
         self._s = settings
         self._client = client if client is not None else VLMClient()
+        self._watchlist = watchlist if watchlist is not None else Watchlist(
+            settings.watchlist_path,
+            seed_path=settings.watchlist_seed_path,
+            preamble=settings.watchlist_preamble,
+            max_items=settings.watchlist_max_items,
+            enabled=settings.watchlist_enabled,
+        )
 
     @property
     def model(self) -> str:
         return self._client.model
 
+    @property
+    def watchlist(self) -> Watchlist:
+        """Exposed so the pipeline can log what the captioner is currently watching for."""
+        return self._watchlist
+
     def caption(self, chunks: Sequence[VLMChunk]) -> list[VLMResult]:
-        # No max_tokens argument. The live profile caps it at 80 (invariant 6) and asking
-        # for more is a ProfileViolation, not a tuning decision M1 gets to make.
-        return self._client.caption(list(chunks), prompt=self._s.caption_prompt)
+        # No max_tokens argument. The live profile owns the output budget (invariant 6)
+        # and asking for more is a ProfileViolation, not a tuning decision M1 gets to make.
+        #
+        # The watchlist suffix is re-resolved per call rather than cached at construction:
+        # tasks are created and deleted through the UI while ingest is running, and a
+        # captioner that read the task list once at boot would keep steering captions
+        # toward a task the user deleted an hour ago. It is an mtime check, not a re-parse.
+        prompt = self._watchlist.apply(self._s.caption_prompt)
+        return self._client.caption(list(chunks), prompt=prompt)
 
 
 class StubCaptioner:

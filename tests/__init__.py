@@ -43,6 +43,13 @@ _paths = _settings.setdefault("paths", {})
 _paths["action_log"] = str(_TMP / "actions.jsonl")
 _paths["chat_log"] = str(_TMP / "chats.jsonl")
 _paths["clips"] = str(_TMP / "clips")
+# The archive, for the same reason as the rest — plus one that is worse than writing to
+# it. `services/retention.py` DELETES segment files, and a route test that reached the
+# real `data/archive` would silently unlink hours of recorded footage. It is created
+# rather than merely renamed so `timecode.list_segments` sees an empty archive instead of
+# raising at a directory that is not there.
+_paths["archive"] = str(_TMP / "archive")
+(_TMP / "archive").mkdir(parents=True, exist_ok=True)
 
 _SETTINGS_FILE = _TMP / "settings.yaml"
 _SETTINGS_FILE.write_text(yaml.safe_dump(_settings, sort_keys=False))

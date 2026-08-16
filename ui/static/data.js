@@ -46,6 +46,7 @@ SPARK.data = (function () {
     task: "/api/tasks/", //                       DELETE /<id>, PATCH /<id> -> Task
     monitorState: "/api/monitor/state", //        GET  -> funnel state, shape per ui/mock/monitor_state.json
     actions: "/api/actions", //                   GET  ?t_from&t_to -> {entries: [ActionLogEntry]}
+    retention: "/api/retention", //               GET  -> the plan; POST {confirm} -> deletes it
     video: "/api/video", //                       GET  ?t_from&t_to -> stitched stream (NEVER ?file=)
   };
 
@@ -109,6 +110,29 @@ SPARK.data = (function () {
   function patchTask(taskId, changes) {
     if (isMock()) return Promise.resolve(changes);
     return sendJSON("PATCH", ENDPOINTS.task + encodeURIComponent(taskId), changes);
+  }
+
+  // ---------------------------------------------------------------------------------
+  // Retention — the only destructive call this UI can make.
+  //
+  // Two functions, never one, because the plan is what makes the button honest: the page
+  // shows the file count, the caption count and the bytes BEFORE anything is unlinked.
+  // Both refuse outright in mock mode. There is no archive behind the fixtures, so a
+  // scripted "deleted 42 files" would be a lie about a destructive action — the one
+  // category of mock this page must not have.
+  // ---------------------------------------------------------------------------------
+  function retentionPlan(olderThanSeconds) {
+    if (isMock()) return Promise.reject(new Error("retention needs live M3; this page is on fixtures"));
+    var qs = olderThanSeconds ? "?older_than_seconds=" + encodeURIComponent(olderThanSeconds) : "";
+    return getJSON(ENDPOINTS.retention + qs);
+  }
+
+  /** Irreversible. Only called from a confirmed click in retention.js. */
+  function applyRetention(olderThanSeconds) {
+    if (isMock()) return Promise.reject(new Error("retention needs live M3; this page is on fixtures"));
+    var body = { confirm: true };
+    if (olderThanSeconds) body.older_than_seconds = olderThanSeconds;
+    return postJSON(ENDPOINTS.retention, body);
   }
 
   function postJSON(url, body) {
@@ -558,6 +582,8 @@ SPARK.data = (function () {
     registerTask: registerTask,
     deleteTask: deleteTask,
     patchTask: patchTask,
+    retentionPlan: retentionPlan,
+    applyRetention: applyRetention,
     syntheticMonitorRow: syntheticMonitorRow,
     ask: ask,
     demoQuestions: demoQuestions,

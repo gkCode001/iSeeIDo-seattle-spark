@@ -36,10 +36,25 @@ seems to require breaking one, stop and ask.
 5. **MCP actions go through cooldown + time-range dedupe + the append-only log.**
    No exceptions, no direct calls to the action server. Actions cannot be un-fired.
 
-6. **Live path: `enable_reasoning=false`, `max_tokens=80`.** Deep path:
-   `enable_reasoning=true`, `max_tokens≈600`. Decode is ~95% of latency and is
-   bandwidth-bound; output token count is the main dial. Do not "improve" captions by
-   letting them get longer.
+6. **Live path: `enable_reasoning=false`.** Deep path: `enable_reasoning=true`,
+   `max_tokens≈600`. Decode is ~95% of latency and is bandwidth-bound; output token
+   count is the main dial.
+
+   **`max_tokens` on the live path is now 320, not 80** — changed deliberately on
+   2026-08-15 with measurements, not by drift. The rule this replaces ("do not improve
+   captions by letting them get longer") was right about the mechanism and wrong about
+   the size on this model. What the numbers say, on real 1080p frames:
+
+   - The cap alone changes nothing. At 80 and at 160 the model produced the same 65
+     tokens and never truncated — it stops when the *prompt* is satisfied.
+   - 80 tokens was buying less than it looked. 97% of captions spent a median 10 of 42
+     words describing our own burned-in clock.
+   - Asking for real detail costs 2.51 s a caption. Against a 4 s stride with the gate
+     skipping ~78%, that is 0.55 s per stride — a 14% duty cycle.
+
+   **The gate is what makes this affordable.** If its skip rate falls below ~40%, put
+   this number back before anything else: at 2.5 s a caption, real-time depends on most
+   windows never reaching the VLM.
 
 7. **The archive stays at native resolution.** Downscaling only ever applies to the
    live analysis path. The archive is what the worker re-reads.

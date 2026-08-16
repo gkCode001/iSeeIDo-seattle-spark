@@ -14,6 +14,33 @@ paths:
   chat_log: data/chats.jsonl     # chat turns + job refs, SPEC §11.4
 
 # --------------------------------------------------------------------------------------
+# Retention — the "delete footage and captions older than N" sweep (the topbar button)
+# --------------------------------------------------------------------------------------
+# This is the one operation in the system that destroys evidence, and nothing undoes it:
+# the archive is the ONLY thing the deep worker can re-read (invariant 7), so a swept
+# hour is an hour that can never be re-analysed, only remembered through whatever caption
+# survived. Hence a plan/apply split rather than a single call — the button shows what it
+# is about to destroy, with real counts, before anything is unlinked.
+#
+# Disk is not the reason to use it. At ~22 GB/day measured (CLAUDE.md) against 3.3 TB
+# free, the archive is not close to a problem; this exists so a rehearsal can be reset
+# and a demo can start from a known-empty history.
+retention:
+  max_age_seconds: 10800         # 3 hours — what the button offers by default
+  # A floor on what any request may ask for, whatever the caller says. The recent past is
+  # where the live window, ingest's backlog and any in-flight deep job all live; a sweep
+  # that reaches into it deletes the footage the next question is about.
+  min_age_seconds: 900           # 15 minutes
+  # Never unlink the file ffmpeg currently has open — that takes the recorder's mp4
+  # finalisation with it, and a hard-killed segment is undecodable for every window
+  # overlapping it (CLAUDE.md). The newest segment on disk is always kept, as is anything
+  # modified within this many segment lengths of now.
+  live_segment_guard_segments: 2
+  # Evidence clips under `paths.clips` are deliberately NOT swept. They are what SPEC
+  # §6.4's "why did you alert at 21:11?" renders from, the action log that references
+  # them is append-only, and they are megabytes against the archive's gigabytes.
+
+# --------------------------------------------------------------------------------------
 # Recorder — SPEC §2.1
 # --------------------------------------------------------------------------------------
 recorder:
@@ -98,6 +125,22 @@ recorder:
 # Ingest — SPEC §2.2 / §2.3 / §2.4
 # --------------------------------------------------------------------------------------
 ingest:
+  # Task-aware captioning. The caption is the only substrate M5 detection has, so the
+  # active standing tasks are appended to the caption prompt as an explicit checklist.
+  # See services/ingest/watchlist.py. Set `enabled: false` to go back to a purely
+  # general caption — Ask is unaffected either way, Watch gets markedly worse.
+  watchlist:
+    enabled: true
+    # Written by whoever owns task CRUD (the agent server), polled by mtime here, because
+    # M1 and M5 are separate processes and runtime task registrations live in neither's
+    # config file. Falls back to `monitor.tasks_file` when absent, so a box that has
+    # never opened the UI still gets a task-aware caption from the cold-start seed.
+    path: data/watchlist.json
+    # The prompt grows one line per task and prefill stops being free eventually. Tasks
+    # past this cap steer no captions at all, so the truncation is logged loudly rather
+    # than applied quietly.
+    max_items: 8
+
   window_seconds: 5              # latency floor is "wait for the window to close"
   stride_seconds: 4              # 1 s overlap so a boundary event is not halved
   sample_fps: 1                  # -> 5 frames per window
@@ -202,11 +245,39 @@ vlm:
     # cost (SPEC §2.4), so 80 -> 160 tokens roughly doubles caption latency and halves
     # the headroom the deep worker shares. Recovering the wasted quarter is free.
     caption: >-
-      Describe what is happening in at most two short sentences.
-      Lead with what people are DOING — actions, gestures, movement, and how many
-      people there are. Name objects, colours and clothing only when they matter to
-      the action. Do NOT describe or quote the timestamp burned into the frame.
-      Report only what is visible; do not speculate about intent.
+      Describe this moment in four to six sentences. Be specific and concrete — this
+      text is the ONLY record of the moment once the window closes, and a later search
+      has nothing else to match on.
+      (1) The people: how many, and for EACH of them what they are doing, what they are
+      holding or touching, and where they are looking.
+      (2) What they are wearing: colours and distinctive items.
+      (3) The objects and surroundings that matter — furniture, screens, doors,
+      vehicles — and where people are relative to them.
+      (4) What CHANGES across the frames: who moves, what enters or leaves, what is
+      picked up or put down. Say explicitly if nothing moves.
+      No preamble: do not open with "This image", "The scene shows" or "appears to be".
+      Do NOT describe or quote the timestamp burned into the frame.
+      Report only what is visible; do not speculate about intent or identity.
+
+    # Appended to `caption` above when standing tasks are active — see
+    # services/ingest/watchlist.py for why. Short story: M5 stage 1 is a cosine against
+    # the caption and stage 2 re-reads the caption, so neither ever sees a pixel. A
+    # detail the caption omits is a task that can never fire. Rather than hope a general
+    # caption mentions the right noun, ask for it.
+    #
+    # The last line is load-bearing. Naming a thing to look for biases the model toward
+    # reporting it; "only if you can actually see it" plus stage 2's re-read and stage 3's
+    # 4 fps re-watch are what keep that from becoming a false alert. Deleting that line
+    # turns the checklist into a suggestion box.
+    #
+    # Costs prefill, not decode. SPEC §2.5: prefill ~5% of per-chunk cost, so this does
+    # not touch the 320-token output budget below.
+    watchlist_preamble: >-
+      Then add a final line starting "WATCHING:" that states, for each item below,
+      whether it is present in these frames. Name the item and answer present or absent.
+      Say present ONLY if you can actually see it — a guess here triggers a real alert.
+      Items:
+
     deep: >-
       Watch this footage closely and answer the question. Cite the burned-in
       timestamps for anything you report. If the footage does not show enough
@@ -215,7 +286,23 @@ vlm:
   profiles:
     live:
       enable_reasoning: false    # a CoT caption is 1000+ tokens -> 60 s+/chunk
-      max_tokens: 80             # decode is ~95% of cost; this is THE dial
+      # Raised from 80 on 2026-08-15, deliberately and with measurements — see
+      # CLAUDE.md invariant 6, which this supersedes for THIS model. Measured on real
+      # 1080p webcam frames, four identical windows:
+      #
+      #   cap   latency   tokens produced   truncated
+      #    80    0.77 s        65             0/4      <- the cap was not the limit
+      #   160    0.66 s        65             0/4
+      #   320    2.51 s       124             0/4      <- with the fuller prompt below
+      #
+      # The cap alone changes nothing: the model stops when the PROMPT is satisfied.
+      # What costs latency is asking for more, and that cost is affordable here —
+      # 2.51 s per captioned window against a 4 s stride, and the detector gate skips
+      # ~78%, so the effective load is 0.55 s per stride (14% duty cycle).
+      #
+      # If the gate's skip rate ever falls below ~40%, this is the first number to put
+      # back: at 2.5 s a caption, real-time needs most windows to be skipped.
+      max_tokens: 320
       temperature: 0.0
       request_timeout_seconds: 30   # expected ~2 s. Anything near this is pathological.
     deep:

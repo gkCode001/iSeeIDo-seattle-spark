@@ -115,9 +115,21 @@ def client(transport: FakeTransport, **kwargs: Any) -> VLMClient:
 
 class TestProfiles(unittest.TestCase):
     def test_live_profile_matches_the_invariant(self) -> None:
+        """Invariant 6's two halves, and only one of them is a fixed number.
+
+        ``enable_reasoning`` is absolute: this is a thinking model, and left on it spends
+        the whole budget inside ``reasoning_content`` and returns an empty caption.
+
+        ``max_tokens`` is a measured setting, not a constant. It was 80 while the caption
+        was one line; it is 320 now that the caption also answers the standing-task
+        checklist (services/ingest/watchlist.py). Asserted against the config rather than
+        a literal so that re-tuning it is a settings edit, not a test edit — what must not
+        drift is the client honouring the profile.
+        """
         c = client(FakeTransport())
         self.assertFalse(c.live.enable_reasoning)
-        self.assertEqual(c.live.max_tokens, 80)
+        self.assertEqual(c.live.max_tokens, int(config.get("vlm.profiles.live.max_tokens")))
+        self.assertGreater(c.live.max_tokens, 0)
 
     def test_deep_profile_matches_the_spec(self) -> None:
         c = client(FakeTransport())
@@ -129,7 +141,7 @@ class TestProfiles(unittest.TestCase):
     def test_caption_sends_the_live_profile(self) -> None:
         t = FakeTransport()
         client(t).caption([make_chunk()], prompt=PROMPT)
-        self.assertEqual(t.last["max_tokens"], 80)
+        self.assertEqual(t.last["max_tokens"], int(config.get("vlm.profiles.live.max_tokens")))
         self.assertEqual(t.last["temperature"], 0.0)
         self.assertIs(t.last["chat_template_kwargs"]["enable_reasoning"], False)
 

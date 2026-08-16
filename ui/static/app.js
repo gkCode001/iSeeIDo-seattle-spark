@@ -62,6 +62,9 @@
           SPARK.ask.init(document.querySelector("[data-ask]"), cfg, chunks),
           SPARK.watch.init(document.querySelector("[data-watch]"), cfg),
           SPARK.timeline.init(document.querySelector("[data-timeline]"), cfg),
+          // The topbar's delete control. Wired last and separately from the panes: it
+          // reads nothing they render and writes nothing they hold.
+          SPARK.retention.init(cfg),
         ];
 
         // Live push channel. In mock mode this is a no-op: the scripted timers in

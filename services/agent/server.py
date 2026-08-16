@@ -20,8 +20,10 @@ that file is the contract:
     GET  /api/tasks                         -> {tasks: [Task]}
     GET  /api/monitor/state                 -> funnel state (§11.3)
     GET  /api/actions         ?t_from&t_to  -> {entries: [ActionLogEntry]}
+    GET  /api/retention       ?older_than_seconds -> what a sweep WOULD delete
     GET  /api/video           ?t_from&t_to  -> stitched footage, NEVER ?file=
     POST /api/ask             {question}    -> ChatTurn.to_dict() + {dedupe_of?, job?}
+    POST /api/retention       {confirm, older_than_seconds?} -> deletes footage. Final.
     POST /api/register_task   Task fields   -> Task
     WS   /ws                                -> refinement | monitor_state | action
 
@@ -44,7 +46,9 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 from services.index import IndexStore, build_index
+from services.ingest.watchlist import write_watchlist
 from services.mcp import ActionServer, ClipCutter, NullClipCutter, build_clip_plan, clip_path_for
+from services.retention import RetentionSettings, apply_retention, plan_retention
 from shared import config, timecode
 from shared.schema import DeepJob, JobState, Tier, from_iso, to_iso, utcnow
 
@@ -82,6 +86,10 @@ class AgentApp:
     hub: WebSocketHub
     settings: AgentSettings
     clip_cutter: ClipCutter
+    #: Overridable like every other dependency, and for a sharper reason than the rest:
+    #: this one names the directory the retention routes DELETE from. A test that picked
+    #: it up from config would unlink the real archive.
+    retention: RetentionSettings | None = None
     #: M5, running in this process. SPEC §1 draws it as its own module, which it is —
     #: but as a separate PROCESS it would need its own copy of the task registry, and a
     #: task registered through this server would never reach it. Sharing the registry is
@@ -111,6 +119,10 @@ class AgentApp:
                 )
             )
         self.jobs.start()
+        # Reconcile the captioner's watchlist with the task set this process actually
+        # holds. Without this, a file left by a previous run keeps steering captions
+        # toward tasks that died with that process.
+        self._publish_watchlist()
         if self.monitor is not None:
             self.monitor.start()
 
@@ -314,6 +326,31 @@ class AgentApp:
         )
         return HTTPStatus.OK, result.to_payload()
 
+    def _publish_watchlist(self) -> None:
+        """Push the live task set to the file M1's captioner polls.
+
+        M5's stage 1 is a cosine against the caption and stage 2 re-reads the caption, so
+        a detail the caption omits is a task that can never fire (see
+        ``services/ingest/watchlist.py``). M1 appends the active tasks to its caption
+        prompt to close that hole — but M1 is a separate process and runtime
+        registrations live in nobody's config file, so the list has to reach it through
+        something both can see.
+
+        Called from every mutation rather than from the task store, because ``self.tasks``
+        is duck-typed: it may be the agent's placeholder store or M5's real registry, and
+        this is the one place both converge.
+
+        Failures are logged and swallowed. A stale watchlist degrades captions to general
+        ones; an exception here would fail a task edit the user just made and did not
+        ask to have coupled to ingest.
+        """
+        if not bool(config.get("ingest.watchlist.enabled", True)):
+            return
+        try:
+            write_watchlist(config.repo_path("ingest.watchlist.path"), self.tasks.tasks())
+        except Exception as exc:  # noqa: BLE001 - see docstring
+            log_event("agent.watchlist.publish_failed", error=str(exc))
+
     def post_register_task(self, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         """SPEC §10 D5 / §11.3. The endpoint is ours; the registry is M5's."""
         try:
@@ -324,6 +361,7 @@ class AgentApp:
             registered = self.tasks.register(task)
         except DuplicateTaskError as exc:
             return HTTPStatus.CONFLICT, {"detail": str(exc)}
+        self._publish_watchlist()
         return HTTPStatus.OK, registered.to_dict()
 
     def delete_task(self, task_id: str) -> tuple[int, dict[str, Any]]:
@@ -346,6 +384,7 @@ class AgentApp:
             return HTTPStatus.NOT_FOUND, {"detail": f"no such task: {task_id}"}
         except ValueError as exc:
             return HTTPStatus.BAD_REQUEST, {"detail": str(exc)}
+        self._publish_watchlist()
         return HTTPStatus.OK, {"deleted": removed.to_dict()}
 
     def patch_task(self, task_id: str, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
@@ -374,7 +413,101 @@ class AgentApp:
             return HTTPStatus.NOT_FOUND, {"detail": f"no such task: {task_id}"}
         except ValueError as exc:
             return HTTPStatus.BAD_REQUEST, {"detail": str(exc)}
+        self._publish_watchlist()
         return HTTPStatus.OK, updated.to_dict()
+
+    # -- routes: retention ---------------------------------------------------------------
+
+    def get_retention(self, older_than_seconds: float | None = None) -> tuple[int, dict[str, Any]]:
+        """``GET /api/retention`` — what a sweep *would* delete. Deletes nothing.
+
+        The read half of ``services/retention.py``'s plan/apply split, exposed as its own
+        endpoint so the button can put real counts in front of a human before the one
+        irreversible operation in this system runs.
+        """
+        settings = self._retention_settings()
+        try:
+            plan = plan_retention(
+                self.index, older_than_seconds=older_than_seconds, settings=settings
+            )
+        except ValueError as exc:
+            return HTTPStatus.BAD_REQUEST, {"detail": str(exc)}
+        except Exception as exc:  # noqa: BLE001 — a broken archive is a 503, not a 500
+            return HTTPStatus.SERVICE_UNAVAILABLE, {"detail": f"{type(exc).__name__}: {exc}"}
+        payload = plan.to_dict()
+        payload["defaults"] = {
+            "max_age_seconds": settings.max_age_seconds,
+            "min_age_seconds": settings.min_age_seconds,
+        }
+        return HTTPStatus.OK, payload
+
+    def post_retention(self, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        """``POST /api/retention`` — delete footage and captions older than the cutoff.
+
+        **Irreversible, and the only route here that destroys anything.** Three things
+        stand in front of it:
+
+        * ``confirm: true`` is required. A route that deletes an afternoon of footage
+          should not be reachable by a stray POST or a page that reloaded oddly.
+        * ``retention.min_age_seconds`` is enforced in the planner, not here, so the CLI
+          and the endpoint refuse the same requests.
+        * An in-flight deep job over the doomed range blocks the sweep. M4 re-reads the
+          archive by time range; deleting the footage under a running job turns a 90 s
+          escalation into a decode error, on stage, with no way to tell the two apart.
+
+        The plan is recomputed here rather than trusted from the client — the ids in a
+        GET from thirty seconds ago are a description of the disk, not a licence to
+        delete whatever the request names.
+        """
+        if not bool(body.get("confirm")):
+            return HTTPStatus.BAD_REQUEST, {
+                "detail": "confirm: true is required; this deletes footage permanently"
+            }
+        requested = body.get("older_than_seconds")
+        try:
+            older_than = None if requested is None else float(requested)
+        except (TypeError, ValueError):
+            return HTTPStatus.BAD_REQUEST, {
+                "detail": f"older_than_seconds must be a number, got {requested!r}"
+            }
+
+        try:
+            plan = plan_retention(
+                self.index,
+                older_than_seconds=older_than,
+                settings=self._retention_settings(),
+            )
+        except ValueError as exc:
+            return HTTPStatus.BAD_REQUEST, {"detail": str(exc)}
+        except Exception as exc:  # noqa: BLE001
+            return HTTPStatus.SERVICE_UNAVAILABLE, {"detail": f"{type(exc).__name__}: {exc}"}
+
+        blocking = self._jobs_over(plan.cutoff)
+        if blocking:
+            return HTTPStatus.CONFLICT, {
+                "detail": (
+                    f"{len(blocking)} deep job(s) are re-watching footage older than "
+                    f"{to_iso(plan.cutoff)}: {', '.join(blocking)}. Deleting it now would "
+                    f"fail them mid-flight. Wait for them to land."
+                ),
+                "jobs": blocking,
+            }
+
+        result = apply_retention(self.index, plan)
+        return HTTPStatus.OK, result.to_dict()
+
+    def _jobs_over(self, cutoff: datetime) -> list[str]:
+        """Ids of queued/running deep jobs whose range reaches back past ``cutoff``."""
+        live = (JobState.QUEUED, JobState.RUNNING)
+        return sorted(
+            job_id
+            for job_id, job in self.jobs.jobs().items()
+            if job.state in live and job.t_start < cutoff
+        )
+
+    def _retention_settings(self) -> RetentionSettings:
+        """Injected if the caller supplied one, from config otherwise."""
+        return self.retention if self.retention is not None else RetentionSettings.from_config()
 
     # -- routes: video ------------------------------------------------------------------
 
@@ -499,6 +632,22 @@ class _Handler(BaseHTTPRequestHandler):
         except ValueError:
             return default
 
+    def _number(self, name: str) -> float | None:
+        """A query parameter as a float, or None when absent or unparseable.
+
+        None means "use the configured default", and the plan echoes back the age it
+        actually resolved — so a typo produces a visibly different preview rather than a
+        silent one. Only the read-only planner takes a number this way; the POST that
+        deletes parses its own body and rejects garbage outright.
+        """
+        raw = self._text(name)
+        if raw is None:
+            return None
+        try:
+            return float(raw)
+        except ValueError:
+            return None
+
     def _flag(self, name: str, default: bool | None = None) -> bool | None:
         """Tri-state: absent/``any`` keeps ``default`` (usually None = do not filter)."""
         raw = self._text(name)
@@ -565,6 +714,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json(*self.app.get_monitor_state())
             elif route == "/api/actions":
                 self._send_json(*self.app.get_actions(self._param("t_from"), self._param("t_to")))
+            elif route == "/api/retention":
+                self._send_json(*self.app.get_retention(self._number("older_than_seconds")))
             elif route == "/api/video":
                 self._serve_video()
             elif route == "/api/live.jpg":
@@ -593,6 +744,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json(*self.app.post_ask(body))
             elif route == "/api/register_task":
                 self._send_json(*self.app.post_register_task(body))
+            elif route == "/api/retention":
+                self._send_json(*self.app.post_retention(body))
             else:
                 self._send_json(HTTPStatus.NOT_FOUND, {"detail": f"no such endpoint: {route}"})
         except BrokenPipeError:  # pragma: no cover

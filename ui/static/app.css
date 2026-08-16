@@ -103,6 +103,70 @@ body {
   background: rgba(88, 209, 160, 0.1);
 }
 
+/* The delete control. Red because it destroys footage, and quiet enough at rest that a
+   three-pane cockpit does not read as an alarm — it earns attention on hover and in the
+   panel below, not by sitting on the page shouting. */
+.pill--danger {
+  color: var(--bad);
+  border-color: rgba(224, 112, 106, 0.45);
+  background: rgba(224, 112, 106, 0.08);
+  cursor: pointer;
+}
+.pill--danger:hover:not(:disabled) {
+  border-color: var(--bad);
+  background: rgba(224, 112, 106, 0.18);
+}
+.pill--danger:disabled {
+  color: var(--muted);
+  border-color: var(--line);
+  background: var(--panel-2);
+  cursor: not-allowed;
+}
+
+/* Confirmation strip. Full width, under the topbar, in the flow — it pushes the console
+   down rather than floating over it, so it cannot be dismissed by the stray click that
+   opened it and cannot be missed by someone looking at a pane. */
+.purge {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  font-family: var(--mono);
+  font-size: 12px;
+  background: rgba(224, 112, 106, 0.1);
+  border-bottom: 1px solid rgba(224, 112, 106, 0.4);
+}
+.purge-line {
+  margin: 0;
+  color: var(--text);
+  flex: 1 1 320px;
+  line-height: 1.5;
+}
+.purge-note {
+  margin: 0;
+  flex: 1 1 100%;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.purge-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.btn--danger {
+  background: rgba(224, 112, 106, 0.16);
+  border-color: rgba(224, 112, 106, 0.55);
+  color: #f6d2cf;
+}
+.btn--danger:hover:not(:disabled) {
+  border-color: var(--bad);
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .banner {
   padding: 8px 14px;
   font-family: var(--mono);

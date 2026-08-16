@@ -210,6 +210,26 @@ class VectorBackend(Protocol):
         """
         ...
 
+    def select_before(self, cutoff: datetime) -> list[str]:
+        """Ids of records that ended at or before ``cutoff``. Read-only.
+
+        **``t_end``, not ``t_start``, and not the overlap rule the reads above use.** A
+        window straddling the cutoff still describes footage on the newer side of it, and
+        the caller here is about to delete what it is given. Retrieval widens at a
+        boundary because a missed hit is a bad answer; deletion narrows at the same
+        boundary because an over-eager one is unrecoverable.
+        """
+        ...
+
+    def delete(self, chunk_ids: list[str]) -> int:
+        """Remove records by id. Returns how many were actually there.
+
+        Separate from :meth:`select_before` on purpose: the caller plans against the ids,
+        shows them to a human, and deletes exactly that set — so a record written between
+        the two calls cannot be swept by a decision nobody saw.
+        """
+        ...
+
     def counts(self) -> IndexCounts:
         ...
 
@@ -324,6 +344,29 @@ class InMemoryBackend:
         self._absorb(records)
         self._persist()
         return len(records)
+
+    def select_before(self, cutoff: datetime) -> list[str]:
+        self.ensure_ready()
+        return [record.chunk_id for record in self._all() if record.t_end <= cutoff]
+
+    def delete(self, chunk_ids: list[str]) -> int:
+        """Drop the ids from both stores and rewrite the JSONL.
+
+        The rewrite is the same whole-file atomic swap :meth:`_persist` does for writes.
+        That matters more here than there: this file is the corpus every other process
+        reads (``ensure_ready`` re-reads it on change), so a half-truncated index would
+        propagate to M3 and M5 as silently missing footage rather than as an error.
+        """
+        self.ensure_ready()
+        removed = 0
+        for chunk_id in chunk_ids:
+            gone = self._searchable.pop(chunk_id, None) or self._gated.pop(chunk_id, None)
+            self._norms.pop(chunk_id, None)
+            if gone is not None:
+                removed += 1
+        if removed:
+            self._persist()
+        return removed
 
     def _persist(self) -> None:
         if not self._path:
@@ -579,6 +622,47 @@ class MilvusBackend:
                 self._collection.upsert(rows, partition_name=partition)
                 written += len(rows)
         return written
+
+    def select_before(self, cutoff: datetime) -> list[str]:
+        """Scan both partitions for rows that ended at or before ``cutoff``.
+
+        Reads ``chunk_id`` only. The retention sweep asks this about hours of corpus at a
+        time, and the payloads it would otherwise drag back are exactly the rows about to
+        stop existing.
+        """
+        self.ensure_ready()
+        ids: list[str] = []
+        iterator = self._collection.query_iterator(
+            batch_size=self._s.browse_scan_batch,
+            expr=f"t_end_us <= {_to_us(cutoff)}",
+            partition_names=[self._s.live_partition, self._s.gated_partition],
+            output_fields=["chunk_id"],
+        )
+        try:
+            while True:
+                batch = iterator.next()
+                if not batch:
+                    break
+                ids.extend(str(row["chunk_id"]) for row in batch)
+        finally:
+            iterator.close()
+        return ids
+
+    def delete(self, chunk_ids: list[str]) -> int:
+        """Delete by primary key, in batches the expression length can hold."""
+        self.ensure_ready()
+        if not chunk_ids:
+            return 0
+        deleted = 0
+        with timed("index.delete", backend="milvus", count=len(chunk_ids)):
+            batch_size = self._s.browse_scan_batch
+            for start in range(0, len(chunk_ids), batch_size):
+                batch = chunk_ids[start : start + batch_size]
+                quoted = ", ".join(f'"{cid}"' for cid in batch)
+                self._collection.delete(expr=f"chunk_id in [{quoted}]")
+                deleted += len(batch)
+            self._collection.flush()
+        return deleted
 
     # -- reads -------------------------------------------------------------------
 
