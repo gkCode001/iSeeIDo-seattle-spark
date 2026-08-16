@@ -24,14 +24,15 @@ Full design in [`SPEC.md`](SPEC.md). Working rules and hard invariants in
 | Module | State |
 |---|---|
 | `shared/` — schema, timecode, VLM client, priority queue | **Built.** `timecode.py` is load-bearing: boundary-spanning ranges, segment gaps, drift, DST. |
-| `services/recorder/` — the ffmpeg segmenter (SPEC §2.1) | **Built.** Verified end-to-end against a USB webcam (2026-08-15) and an iPhone over RTSP (2026-08-16). |
-| `services/index/` — M2, the index (SPEC §3) | **Built.** Runs today on the `memory` + `hashing` + `lexical` backends, i.e. with no Milvus and no NGC key. |
-| `services/mcp/` — the action server and the three brakes (SPEC §6.4) | **Built.** |
+| `services/recorder/` — the ffmpeg segmenter (SPEC §2.1) | **Built.** Verified end-to-end against a USB webcam (2026-08-15) and an iPhone over RTSP (2026-08-16). Today's camera is a DJI Osmo Pocket 4 in webcam mode on `/dev/video0`. |
+| `services/importer/` — recorded video in, via a drop folder | **Built.** Slices any video file into correctly named archive segments — its own camera id, placed ending *now* — then walks it with the same M1. `--inbox` and `--watch` for the folder, or name a file. |
+| `services/index/` — M2, the index (SPEC §3) | **Built.** Runs today on the `memory` + `hashing` + `lexical` backends, i.e. with no Milvus and no NGC key. Retrieval blends recency in, so on one fixed camera the newer of two look-alike captions wins. |
+| `services/mcp/` — the action server and the three brakes (SPEC §6.4) | **Built.** Actions: `save_clip`, `raise_alert`, `file_ticket`, and `notify_discord` — the last posts through AlertBridge, the box's Discord relay, and sits *behind* the brakes because a posted message cannot be un-posted. |
 | `ui/` — the single page, three panes (SPEC §11) | **Built.** Renders from fixtures in `ui/mock/`; assets vendored, no CDN. |
 | `services/ingest/` — M1, gate + captioning (SPEC §2) | **Built.** Motion gate needs no new dependency: ffmpeg emits 32x32 grayscale thumbnails and the diff is pure Python. Measured **78% skip rate** on real webcam footage (SPEC targets ≥80%). |
 | `services/worker/` — M4, the deep worker (SPEC §5) | **Built.** Cuts real evidence clips across segment boundaries. Confidence is a documented *coverage* heuristic, not certainty. |
 | `services/agent/` — M3, the ask agent + server (SPEC §4) | **Built.** stdlib `http.server` + a hand-rolled RFC 6455 WebSocket, because fastapi is not installed and was not approved. |
-| `services/monitor/` — M5, the standing-task funnel (SPEC §6) | **Built.** The brakes are the point: 180 overlapping chunks across 12 minutes of one event fire **exactly one** action. |
+| `services/monitor/` — M5, the standing-task funnel (SPEC §6) | **Built, and it fires.** Runs inside M3's process (shared task registry with the Watch pane) or standalone via `python3 -m services.monitor`. The brakes are the point: 180 overlapping chunks across 12 minutes of one event fire **exactly one** action — verified live through `notify_discord`, one event → one message. |
 | `docker-compose.yml`, `deploy/` | **Written, never run.** See "The deployment layer has never executed" below. |
 
 **The full chain runs on real models, on real footage.** camera → recorder → M1 → M2 →
@@ -50,9 +51,17 @@ The VLM demonstrably **reads the burned-in wall clock** — captions cite
 
 ### What is not wired yet
 
-**M5 standing tasks do not fire.** `services/monitor` has no `__main__.py` and its
-worker-verifier cannot receive a verdict, so the Watch pane renders tasks and funnel
-state but no action fires and no retraction happens. Fix before demoing that pane.
+**M5 now fires — an earlier version of this section said it didn't.** Two fixes closed
+it: stage 2 sends `agent.extra_body` (on Lightning that disables thinking, without which
+every 8-token verdict was a truncated preamble and the confirmer failed closed on every
+chunk), and `notify_discord` gives a task an action that reaches off the box. Both
+verified live.
+
+**`notify_discord` needs a token.** The send goes through AlertBridge
+(`/opt/alertbridge`, :8081) — the box's service, which owns the Discord webhook; no
+credential lives in this repo. `scripts/start.sh` sources `ALERTBRIDGE_SERVICE_TOKEN`
+from `.env.local` when it is not already exported, and refuses to start a Discord task
+without it.
 
 **`docker-compose.yml` has never been run.** It is not needed — see Prerequisites — but
 it is also unverified.
@@ -60,7 +69,8 @@ it is also unverified.
 ### Backends are swappable, by design
 
 `config/settings.yaml` runs `vlm.backend: vllm` and `agent.backend: nim` against the
-local `llama-server`, with `index.store.backend: memory`, `index.embed.backend: hashing`
+box's own model servers (the VLM on :8082, Lightning on :8000), with
+`index.store.backend: memory`, `index.embed.backend: hashing`
 and `index.rerank.backend: lexical`. Each has a stub/in-memory sibling that needs no
 model at all, which is how the pipeline was proven before a model was serving — set
 `vlm.backend: stub` to get back there. Flip the index backends to `milvus` / `nim` if you
@@ -112,9 +122,9 @@ Filter by caption substring, tier, time range; `←`/`→` page. There is a link
 console's top bar.
 
 `start.sh` runs a preflight (reporting *every* missing prerequisite at once, with the fix
-for each), downloads the model if needed, then starts **model server → recorder → ingest
-→ agent**, waiting for each to actually answer before starting the next. Re-running it is
-safe: anything already up is reused.
+for each), checks that both model servers answer — it never starts one — then starts
+**recorder → ingest → agent**, waiting for each to actually answer before starting the
+next. Re-running it is safe: anything already up is reused.
 
 ```bash
 ./scripts/start.sh --no-record   # skip the camera, use existing data/archive
@@ -138,8 +148,25 @@ Logs land in `.run/logs/{model,recorder,ingest,agent}.log`.
 ```bash
 python3 -m services.recorder        # 1. camera/RTSP -> data/archive, 60 s segments
 python3 -m services.ingest --follow # 2. gate + caption + index
-python3 -m services.agent           # 3. ask agent + UI on :8080
+python3 -m services.agent           # 3. ask agent + UI on :8080 (M5 runs in-process)
 ```
+
+### Importing recorded video
+
+Recorded video is the second way footage gets in — a demo clip, an open dataset, the
+files in `demo_videos/`. Drop a file in `data/inbox/` and:
+
+```bash
+python3 -m services.importer --inbox     # slice it onto the timeline, then caption it
+python3 -m services.importer --watch     # keep importing whatever lands in the folder
+python3 -m services.importer clip.mp4    # or import one named file
+```
+
+An import gets **its own camera id** (`clip01`), lands **ending now** so it falls inside
+the ask surface's 30-minute lookback, and is then walked by the same M1 — same gate,
+same prompt, same index. `--start` pins it to a real instant instead. It is not a second
+pipeline: wall-clock lives in the segment filename, so naming the slices correctly is
+the whole trick.
 
 ### Checks
 
@@ -186,9 +213,10 @@ image (they need the runtime to inject `libnvidia-encode.so.1` and `libnvcuvid.s
 ### ~~No NGC credentials~~ — no longer a blocker
 
 `nvcr.io` still returns 401 and there is no `~/.ngc`, but nothing needs it. SPEC §10 D1
-and D3 both resolved to a local model served by the ARM64 + CUDA-13 `llama-server`
-bundled with LM Studio. An NGC key is only required if you want the NIM containers for
-embed/rerank, which the lexical and hashing fallbacks already stand in for.
+and D3 both resolved to models the box already serves — Nemotron Nano 12B v2 VL on :8082
+and Nemotron 3.5 Lightning on :8000. An NGC key is only required if you want the NIM
+containers for embed/rerank, which the lexical and hashing fallbacks already stand in
+for.
 
 ### 4. DeepStream is absent and its sm_121 support is unverified
 
@@ -321,11 +349,11 @@ silently defaulted, because picking one here would hide the decision.
 
 | # | Decision | State |
 |---|---|---|
-| D1 | Which Cosmos 3 variant on the live path? | **OPEN.** Decided by the block-0 caption benchmark (SPEC §9), not by taste — if a 5-frame caption takes >4 s, D1 is forced to a smaller variant. `vlm.model` is null; `VLM_MODEL` has no default and stops Compose if unset. |
+| D1 | Which VLM on the live path? | **RESOLVED: Nemotron Nano 12B v2 VL** (NVFP4, the box's `gn100-vlm` on :8082), by the block-0 benchmark, not by taste — 2.55 s cold / 1.17 s warm against the 4 s cap. `VLM_MODEL` still has no Compose default. |
 | D2 | Live camera or pre-ingested recording? | **RESOLVED: USB webcam**, `/dev/video0` via v4l2. RTSP and file sources remain supported and tested. |
-| D3 | Nemotron 3 Nano or 3.5 Lightning? | **OPEN.** Lightning is newer and desktop-targeted; confirm an ARM64/sm_121 container exists before betting the demo. `agent.model` is null; `LLM_IMAGE` and `LLM_SERVED_NAME` have no defaults. |
+| D3 | Nemotron 3 Nano or 3.5 Lightning? | **RESOLVED: 3.5 Lightning** (NVFP4, the box's `nemoclaw-vllm` on :8000) — it answers the ask surface and M5's stage-2 verdicts, with thinking disabled via `agent.extra_body`. `LLM_IMAGE` and `LLM_SERVED_NAME` still have no Compose defaults. |
 | D4 | Ship the `rollup` index tier? | **OPEN**, stretch goal. `index.rollup.enabled: false`. Skip if the 30 h block is at risk. |
-| D5 | Who writes standing tasks? | **OPEN.** Proposed: build `register_task` as an endpoint and have the §11.3 form POST to it; binding M3 to it is then a tool schema, not a half-day bet made now. |
+| D5 | Who writes standing tasks? | **RESOLVED as proposed.** `POST /api/register_task` exists and the Watch pane's form posts to it; M5 runs in M3's process, so a registered task and the funnel share one registry. `config/tasks.yaml` stays the cold-start seed. |
 | D6 | The two demo questions | **OPEN.** Need one the index genuinely answers and one it genuinely can't, on the same footage. Choose before shooting, not after. |
 | D7 | Funnel visualization in the Watch pane? | **OPEN.** ~45 min over a plain task list, and it is what makes the SPEC §6.4 brakes provable on stage rather than asserted. |
 | D8 | What timezone does the burned-in overlay carry? | **OPEN and time-critical.** The overlay burns UTC while the UI renders local, so on stage that reads as two clocks in one card. **It is baked into the archive at capture time and cannot be changed afterwards — decide before shooting footage.** |
@@ -338,12 +366,14 @@ silently defaulted, because picking one here would hide the decision.
 config/settings.yaml     every tunable number in the system. No magic numbers in service code.
 config/tasks.yaml        standing tasks for M5 (SPEC §6.1)
 shared/                  schema, timecode, the one VLM client, the priority queue
-services/                recorder, ingest (M1), index (M2), agent (M3), worker (M4),
-                         monitor (M5), mcp (the action server)
+services/                recorder, importer, ingest (M1), index (M2), agent (M3),
+                         worker (M4), monitor (M5), mcp (the action server + the
+                         AlertBridge client behind it)
 ui/                      console (index.html: three panes + players) and the index
                          browser (browse.html). Vendored assets, no CDN.
 scripts/doctor.py        `make doctor`
 docker-compose.yml       the container topology — never run, see above
 deploy/                  Dockerfile.app, .env.example
-data/                    archive/, clips/, actions.jsonl, chats.jsonl — bind-mounted, never committed
+data/                    archive/, inbox/ (the importer's drop folder), clips/,
+                         actions.jsonl, chats.jsonl — bind-mounted, never committed
 ```

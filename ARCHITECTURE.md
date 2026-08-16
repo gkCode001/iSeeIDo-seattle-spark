@@ -12,8 +12,10 @@ about every few seconds of footage — but only when something is actually happe
 Those notes go into a searchable index. When a human asks a question, the system
 answers instantly from the notes; when the notes aren't good enough, it goes back and
 **re-watches the original footage** carefully. Standing watch-tasks ("alert me if a
-vehicle blocks the fire door") run against the same notes and fire real actions.
-Everything runs on one machine, offline — no cloud.
+vehicle blocks the fire door") run against the same notes and fire real actions — up
+to and including a Discord message. Recorded video — a demo clip, an open dataset —
+can be dropped into a folder and imported onto the same timeline, where the identical
+pipeline picks it up. Everything runs on one machine, offline — no cloud.
 
 That's why it's called **two-speed**: a fast, cheap, always-on pass, and a slow,
 careful, on-demand pass. The system knows when its own quick summary isn't good
@@ -26,10 +28,12 @@ enough, and escalates itself.
 ```mermaid
 flowchart TB
     CAM(["📷 USB webcam"])
+    DROP(["📂 Recorded video\ndropped in data/inbox/\n(demo clips, open datasets)"])
 
     subgraph ALWAYS["Always running (the fast path)"]
         REC["Recorder\nsaves everything to disk,\n60-second video files"]
-        ING["M1 · Ingest\nmotion gate: skips ~78% of quiet footage\nVLM writes a short caption for the rest"]
+        IMP["Importer\nslices a file onto the real\ntimeline, as its own camera"]
+        ING["M1 · Ingest\nmotion gate: skips quiet footage\nVLM writes a short caption for the rest"]
         IDX[("M2 · Index\nsearchable text notes,\neach pinned to an exact\nwall-clock time range")]
     end
 
@@ -41,11 +45,14 @@ flowchart TB
     end
 
     DEEP["M4 · Deep worker (the slow path)\nre-watches the original footage\ncarefully, cuts an evidence clip"]
-    MCP["MCP actions\nsave_clip · raise_alert · file_ticket\n(with brakes: cooldown, dedupe, action log)"]
+    MCP["MCP actions\nsave_clip · raise_alert · file_ticket · notify_discord\n(with brakes: cooldown, dedupe, action log)"]
+    AB(["📨 AlertBridge → Discord\n(the box's service, not this repo's)"])
     USER(["🧑 Person at the console"])
 
     CAM --> REC --> ARCH
     CAM --> ING --> IDX
+    DROP --> IMP --> ARCH
+    IMP --> ING
     IDX --> ASK
     IDX --> MON
     USER <--> ASK
@@ -53,6 +60,7 @@ flowchart TB
     MON -. "verify before it counts" .-> DEEP
     DEEP -->|"fetch by time range"| ARCH
     MON --> MCP
+    MCP -->|"notify_discord"| AB
 ```
 
 **How to read it:** solid arrows are the everyday flow; dashed arrows are the
@@ -78,10 +86,16 @@ Three design rules make the picture work:
 ```mermaid
 flowchart TB
     subgraph CAPTURE["Capture"]
-        CAM(["/dev/video0 · mjpeg 1080p"])
+        CAM(["/dev/video0 · mjpeg 1080p\n(DJI Osmo Pocket 4, webcam mode)"])
         REC["services/recorder\nffmpeg → h264_nvenc, 1 s keyframes\ncam01_YYYYMMDD_HHMMSS.mp4"]
         ARCH[("data/archive/\n60 s segments, full res")]
         CAM --> REC --> ARCH
+    end
+
+    subgraph IMPORT["Importer · services/importer"]
+        INBOX(["data/inbox/ — the drop folder"])
+        IMP["probe → slice with -c copy\ncut points read back, never assumed\nplaced ending NOW, own id (clip01)\nthen M1 walks the imported range"]
+        INBOX --> IMP
     end
 
     subgraph M1["M1 · services/ingest"]
@@ -97,13 +111,14 @@ flowchart TB
     subgraph M2["M2 · services/index"]
         CHUNK["Chunk record\nchunk_id · t_start/t_end (UTC)\nsegment · pts_offset · caption · embedding"]
         STORE[("Store\nmemory → data/index.jsonl\n(Milvus optional)")]
-        RETR["Retrieval\nembed → ANN top-20 → rerank → top-5\n(hashing + lexical backends today,\nNIM models optional)"]
+        RETR["Retrieval\nembed → ANN top-20 → rerank → top-5\nrecency breaks ties the reranker cannot\n(hashing + lexical backends today,\nNIM models optional)"]
         CHUNK --> STORE --> RETR
     end
 
-    subgraph VLM["One model process — the hard invariant"]
+    subgraph VLM["The box's model servers — this repo starts none"]
         Q["shared/queue.py · priority queue\n1. interactive (a human is waiting)\n2. M5 verification\n3. ingest captions (paused, never starved)"]
-        LS["llama-server :8000\ngemma-4-E2B-it (~4 GB)\nlive profile: reasoning off, 80 tok\ndeep profile: reasoning on, ~600 tok"]
+        LS["Nemotron Nano 12B v2 VL · :8082\nlive profile: no reasoning, 80 tok\ndeep profile: reasoning, ~600 tok"]
+        LLM["Nemotron 3.5 Lightning · :8000\nM3's ask LLM + M5's stage-2 confirmer\n(topbar can rebind M3 to LM Studio)"]
         Q --> LS
     end
 
@@ -133,8 +148,10 @@ flowchart TB
         BRAKES["Three brakes\ncooldown per task\ntime-range dedupe\nappend-only log"]
         LOG[("data/actions.jsonl\nthe only history store —\n'why did you alert at 21:11?'\nis answerable")]
         CLIPS[("data/clips/")]
+        AB["AlertBridge :8081\nthe box's Discord relay —\nowns the webhook, we hold no secret\n202 = accepted, never 'delivered'"]
         BRAKES --> LOG
         BRAKES --> CLIPS
+        BRAKES -->|"notify_discord,\nonly after the brakes say yes"| AB
     end
 
     subgraph UI["ui/ — vendored assets, works offline"]
@@ -143,12 +160,14 @@ flowchart TB
     end
 
     ARCH -->|"decode windows"| WIN
+    IMP --> ARCH
+    IMP -->|"walk the imported range"| WIN
     CAP -->|"VLM call"| Q
     CAP --> CHUNK
     NULLREC --> STORE
     RETR --> TOOLS
     F1 -.->|"subscribes to\nevery new chunk"| STORE
-    F2 -->|"LLM call"| Q
+    F2 -->|"yes/no verdict"| LLM
     F3 --> DEEP
     DEEP -->|"fetch(t_start, t_end)\nnever a filename"| ARCH
     DEEP -->|"VLM calls,\ndeep profile"| Q
@@ -169,13 +188,18 @@ timestamp alone is meaningless — and an event can span two files, which is why
 through `shared/timecode.py` to stitch across boundaries. The wall clock is even
 burned into the frames the VLM sees, so the model itself can cite real times back.
 
-### The one hard resource rule: one model process
+### The one hard resource rule: this repo starts no model
 
-The box has 128 GB of *unified* memory — CPU and GPU share it, and a second model
-instance doesn't run slowly, it crashes the machine. So one `llama-server` serves the
-live captioner, the deep worker, and the ask LLM, with two request profiles (fast/no
-reasoning vs. slow/reasoning) and a priority queue in front: a waiting human beats
-background verification beats ingest, and ingest may be paused but never starved.
+The box has 128 GB of *unified* memory — CPU and GPU share it, and an extra model
+instance doesn't run slowly, it crashes the machine. So the two model servers are the
+machine's own (the VLM on :8082, Nemotron 3.5 Lightning on :8000), `start.sh` checks
+them and stops with the fix if either is down, and nothing in this repo ever spawns an
+engine. The VLM serves the live captioner and the deep worker with two request profiles
+(fast/no reasoning vs. slow/reasoning) and a priority queue in front: a waiting human
+beats background verification beats ingest, and ingest may be paused but never starved.
+Lightning answers the ask surface and speaks M5's stage-2 yes/no verdicts — with
+thinking disabled there, because a confirmer with an 8-token budget that spends it
+reasoning fails closed on every chunk.
 
 ### The end-to-end speeds, measured on the real box
 
@@ -192,10 +216,15 @@ background verification beats ingest, and ingest may be paused but never starved
 |---|---|---|
 | Nemotron Nano 12B v2 VL | 8082 | the box: `systemctl start gn100-vlm` — never this repo |
 | Nemotron 3.5 Lightning (ask LLM) | 8000 | the box: `docker start nemoclaw-vllm` — never this repo |
+| AlertBridge (Discord relay) | 8081 | the box: `/opt/alertbridge` — never this repo |
 | `services/recorder` | — | `scripts/start.sh` |
 | `services/ingest --follow` | — | `scripts/start.sh` |
-| `services/agent` (API + UI) | 8080 | `scripts/start.sh` |
+| `services/agent` (API + UI, M5 in-process) | 8080 | `scripts/start.sh` |
+| `services/importer` | — | by hand, when a file lands in `data/inbox/` |
 
-`services/index` and `services/mcp` are in-process libraries, not daemons. M5's
-runner exists but its action-firing path is not yet wired end-to-end (see README,
-"What is not wired yet").
+`services/index` and `services/mcp` are in-process libraries, not daemons. M5 runs
+inside M3's process by default, so a task registered through the Watch pane
+(`POST /api/register_task`) is the same object the funnel evaluates; `python3 -m
+services.monitor` runs it standalone instead, with tasks seeded from
+`config/tasks.yaml`. Either way an action reaches the world only through
+`services/mcp`, so the brakes apply.
