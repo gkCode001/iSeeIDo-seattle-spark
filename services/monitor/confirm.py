@@ -163,6 +163,14 @@ class NIMConfirmer:
     * **Asks for one word.** ``monitor.confirm_max_tokens`` is single digits. Decode is
       ~95% of latency (CLAUDE.md invariant 6) and stage 2's whole budget is ~1 s; a
       confirmer that explains itself is a confirmer that misses the next chunk.
+    * **Sends ``agent.extra_body``.** The same merge M3 does in ``services/agent/llm.py``,
+      off the same config key. On Lightning that body carries
+      ``chat_template_kwargs.enable_thinking=false``, and it is load-bearing here for the
+      same reason it is there: the model is a hybrid reasoner that otherwise writes its
+      reasoning into ``content``. Against ``confirm_max_tokens`` of 8 that means every
+      answer comes back as a truncated preamble, never ``yes``/``no`` — so stage 2 fails
+      closed on every chunk and no standing task can ever promote. Measured on this box
+      2026-08-16: without it, ``"Here, I need to judge whether the"``; with it, ``"YES"``.
     * **Fails closed.** A transport error returns *no match* rather than raising. Stage 2
       is the gate in front of an action that cannot be un-fired, and "the LLM was
       unreachable" is not evidence that a vehicle is blocking the fire door. The failure
@@ -198,12 +206,18 @@ class NIMConfirmer:
     def confirm(self, caption: str, task: Task) -> ConfirmVerdict:
         import requests  # noqa: PLC0415 — deferred so import works without the dep
 
+        from shared.lmstudio import merge_payload  # noqa: PLC0415 — same reason
+
         body: dict[str, Any] = {
             "model": self._model,
             "messages": self._prompt(caption, task),
             "max_tokens": self._s.confirm_max_tokens,
             "temperature": 0.0,
         }
+        # One level deep, so a config that adds a second chat_template_kwargs entry keeps
+        # the reasoning switch rather than replacing the dict wholesale.
+        if self._s.confirm_extra_body:
+            merge_payload(body, self._s.confirm_extra_body)
         t0 = time.perf_counter()
         try:
             resp = requests.post(self._url, json=body, timeout=self._s.confirm_timeout)

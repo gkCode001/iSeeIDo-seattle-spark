@@ -94,6 +94,7 @@ class MonitorSettings:
     confirm_prompt: str
     confirm_timeout: float
     confirm_max_tokens: int
+    confirm_extra_body: dict[str, object]
     stub_min_overlap: float
 
     # --- stage 3: worker verify ---------------------------------------------------
@@ -140,6 +141,13 @@ class MonitorSettings:
             confirm_prompt=str(_pending("monitor.confirm_prompt")),
             confirm_timeout=float(_pending("monitor.confirm_timeout_seconds")),
             confirm_max_tokens=int(_pending("monitor.confirm_max_tokens")),
+            # Same key M3 reads, for the same reason it reads it: on Lightning,
+            # chat_template_kwargs.enable_thinking=false is the only switch that keeps the
+            # model from writing its reasoning into `content`. Stage 2 asks for 8 tokens
+            # and parses the first word, so without this every confirm reads back as a
+            # sentence fragment ("Here, I need to judge whether the") and fails closed —
+            # a monitor that observes everything and can never promote anything.
+            confirm_extra_body=dict(config.get("agent.extra_body", {}) or {}),
             stub_min_overlap=float(_pending("monitor.stage2_stub_min_overlap")),
             verify_promoted=bool(config.get("monitor.verify_promoted")),
             verify_confidence_threshold=float(_pending("monitor.verify_confidence_threshold")),

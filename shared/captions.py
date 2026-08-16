@@ -57,12 +57,38 @@ ABSENT = "absent"
 #: markers, because a VLM writes "WATCHING:", "**WATCHING:**" and "- Watching:" on
 #: different days and losing the whole block to a stray asterisk would silently disable
 #: every standing task.
-_HEADER_RE = re.compile(r"^[\s\-\*#>]*\**\s*watching\s*\**\s*:", re.IGNORECASE | re.MULTILINE)
+#: Not anchored to the start of a line. Measured on this box 2026-08-16: 36 of 125
+#: watchlist captions ran the block onto the end of the prose — "...a dark floor.
+#: WATCHING: <item>: absent, ..." — and a line-anchored header dropped every one of them
+#: to ``watching={}``. That is the worst possible failure, because it is silent and it
+#: *inverts* stage 1: the fallback cosine scores the two ABSENT tasks 0.19/0.15 over the
+#: present one's 0.11 (see the table above), so the monitor gets the wrong candidate and
+#: misses the right one. A header this tolerant can in principle fire on prose, which
+#: costs nothing: a block with no parseable verdict under it already falls back to
+#: treating the whole caption as description.
+_HEADER_RE = re.compile(
+    r"(?:^|(?<=[\s.;]))[\s\-\*#>]*\**\s*watching\s*\**\s*:", re.IGNORECASE | re.MULTILINE
+)
 
 #: One verdict line: an item, a separator, an answer. The answer is matched at the END so
 #: that a description containing the word "present" does not decide the verdict.
 _LINE_RE = re.compile(
     r"^[\s\-\*•\d\.\)]*(?P<item>.+?)\s*[:—\-]\s*\**(?P<verdict>present|absent|yes|no|not\s+present|not\s+visible)\**\s*[\.\,]?\s*$",
+    re.IGNORECASE,
+)
+
+#: Several verdicts run together on ONE line: ``item: absent, item: absent, item:
+#: present.`` Only used for a line :data:`_LINE_RE` could not read, so the one-verdict-
+#: per-line form — the shape the prompt asks for, and 89 of 125 captions here — keeps
+#: parsing through exactly the path it always did.
+#:
+#: The item cannot contain a colon, which is what bounds each pair without having to
+#: split on commas: task descriptions contain commas ("unloading boxes, then leaving")
+#: and a comma split would cut them in half. Longest alternatives lead so that "not
+#: present" is not read as the "no" inside it.
+_PAIR_RE = re.compile(
+    r"(?P<item>[^:;\n]+?)\s*[:—]\s*"
+    r"(?P<verdict>not\s+present|not\s+visible|present|absent|yes|no)\b",
     re.IGNORECASE,
 )
 
@@ -139,13 +165,26 @@ def split_caption(text: str | None) -> CaptionParts:
         if not line:
             continue
         hit = _LINE_RE.match(line)
-        if hit is None:
+        # A colon left inside the item means this line held SEVERAL verdicts and the
+        # line regex — which anchors its answer to the end of the line — swallowed the
+        # earlier pairs into the item. Left alone that is worse than not parsing: the
+        # single surviving item quotes every task's wording, so `verdict_for` matches all
+        # of them on token overlap and the last verdict on the line decides all three.
+        # Whole-line rejection rather than a repair, because an item never contains a
+        # colon and _PAIR_RE below reads exactly this shape correctly.
+        if hit is not None and ":" not in hit.group("item"):
+            item = hit.group("item").strip().strip("*").strip()
+            verdict = hit.group("verdict").strip().lower()
+            if item:
+                watching[item] = PRESENT if verdict in _TRUE else ABSENT
             continue
-        item = hit.group("item").strip().strip("*").strip()
-        verdict = hit.group("verdict").strip().lower()
-        if not item:
-            continue
-        watching[item] = PRESENT if verdict in _TRUE else ABSENT
+        # One line, several verdicts. Leading punctuation is stripped because each item
+        # after the first starts at the separator the previous pair ended on.
+        for pair in _PAIR_RE.finditer(line):
+            item = pair.group("item").strip(" \t*-•,;.").strip()
+            verdict = " ".join(pair.group("verdict").lower().split())
+            if item:
+                watching[item] = PRESENT if verdict in _TRUE else ABSENT
 
     # A header with nothing parseable under it is a malformed caption, not an empty
     # watchlist. Keeping the raw text as the description means the block still reaches
