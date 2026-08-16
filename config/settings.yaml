@@ -75,32 +75,19 @@ recorder:
   # The archive is what the deep worker re-reads. Never downscale it, never re-encode
   # it to save disk. CLAUDE.md invariant 7.
   copy_codec: true
-  # SPEC §10 D2 — RESOLVED on gn100-2f74: an iPhone running IP Camera Lite, pulled over
-  # RTSP. This box has no /dev/video* at all (verified 2026-08-16: no USB video device on
-  # any bus), and an iPhone cannot be a USB webcam on Linux.
+  # SPEC §10 D2 — RESOLVED on gn100-2f74: a USB webcam, a **DJI Osmo Pocket 4** in webcam
+  # mode (USB id 2ca3:0023), attached and verified 2026-08-16 02:53 UTC.
   #
-  # The address is the phone's PERSONAL HOTSPOT over the USB cable, not its WiFi address.
-  # That was a deliberate choice and it is the better one: the link is point-to-point, so
-  # it cannot be broken by WiFi client isolation or by the phone's DHCP lease moving, and
-  # the same cable keeps the phone charged — which is what actually keeps an iOS camera
-  # app alive for a 30-hour run. 172.20.10.1 is iOS's fixed hotspot gateway address.
-  #
-  # Measured from this stream 2026-08-16: h264 1440x1080@30, keyframes every 1.0 s (the
-  # app already does what `device.keyframe_interval_seconds` would have asked for), AAC
-  # audio alongside, ~6.3 Mbps. Stream-copied, so invariant 7 holds trivially.
-  #
-  # Credentials are IP Camera Lite's defaults on a private USB link; `redact_source`
-  # keeps them out of the logs.
-  source: rtsp://admin:admin@172.20.10.1:8554/live
+  # A local device, deliberately: it cannot be taken out by a network. An `rtsp://` URL
+  # or a file path still work here unchanged if a different source is ever wanted.
+  source: /dev/video0
   device:
-    # UNUSED while `source` is an rtsp:// URL — every key below applies only to the
-    # SourceKind.DEVICE path (see services/recorder/command.py). Kept intact so a USB
-    # camera can be dropped back in by changing `source` alone.
-    #
-    # Capture MODE, not a downscale. Verified against a USB camera on the ORIGINAL dev
-    # box 2026-08-15 (that camera is not attached to gn100-2f74):
+    # Capture MODE, not a downscale. Verified against the attached Osmo Pocket 4:
     #   ffmpeg -f v4l2 -list_formats all -i /dev/video0
     #   mjpeg: 1920x1080, 1080x1920, 3840x2160, 1728x3072   (no raw formats at all)
+    #   HEVC is advertised but this ffmpeg build cannot take it over v4l2
+    # `/dev/video1` exists and exposes no formats — it is the metadata node, not a
+    # second camera. Point this at video0 or ffmpeg fails with an ioctl error.
     # 1080p matches SPEC §2.1's archive budget. 3840x2160 is offered and would give the
     # deep worker more detail to find, at ~4x the disk — revisit only if D1 lands early.
     # NOTE: 1280x720 is NOT supported by this camera; ffmpeg would silently substitute.
@@ -471,9 +458,20 @@ agent:
     # never assumed: re-watching an hour of footage is the expensive path (SPEC §5), and
     # a system that silently reaches for it turns "I don't know" into a 90 s wait.
     extended_lookback_seconds: 86400      # 24 hours
-    # Ask before widening. Set false to go straight to the old behaviour — search the
-    # extended window and escalate without a prompt.
-    confirm_before_widening: true
+    # Ask before widening, or act.
+    #
+    # FALSE on gn100-2f74, deliberately: an unanswerable question searches the extended
+    # window and escalates to the deep worker on its own, with no click. The system is
+    # meant to be autonomous — the demo's whole claim is that it KNOWS when its own
+    # summary is not good enough and goes back to the footage. A confirmation prompt puts
+    # a human in the middle of exactly the moment that claim is being made.
+    #
+    # The cost is real and is the reason `true` exists: a misread question spends tens of
+    # seconds of the single VLM slot re-watching footage nobody asked about, and turns
+    # "I don't know" into a wait. That is a price worth paying here — invariant 4 keeps
+    # the turn itself unblocked (the provisional answer returns immediately and the
+    # refinement is appended when it lands), so the cost is VLM time, never a frozen UI.
+    confirm_before_widening: false
   chunks:
     lookback_seconds: 3600
     max: 500

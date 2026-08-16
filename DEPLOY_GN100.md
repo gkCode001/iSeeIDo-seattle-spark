@@ -97,27 +97,37 @@ edits are needed on a fresh pull. The load-bearing entries, and why:
 | Groundedness gate through real Lightning | clean first-line "NO, …", escalates, returns job id | SPEC §4.2/§4.3 |
 | Deep job on empty archive | honest refusal: "a fact about the recording, not a failure of the analysis" | correct |
 
-## 5. Camera — the remaining physical step
+## 5. Camera — attached and recording
 
-No `/dev/video*` exists; the camera is an **iPhone over RTSP on WiFi** (an
-iPhone cannot be a USB webcam on Linux):
+A **DJI Osmo Pocket 4 in webcam mode** on USB (`2ca3:0023`), verified
+2026-08-16 02:53 UTC. `/dev/video0` is the capture node; `/dev/video1` exists,
+exposes no formats, and is metadata only — pointing ffmpeg at it fails with an
+ioctl error.
 
-1. iPhone on the **same network** as this box, plugged into power, RTSP-server
-   app installed (e.g. "IP Camera Lite"): 1920×1080, H.264, keyframe/GOP
-   interval 1 s if the app offers it (it bounds evidence-clip seek precision —
-   see CLAUDE.md on keyframe interval).
-2. Set `recorder.source` in `config/settings.yaml` to the app's URL, e.g.
-   `rtsp://<iphone-ip>:8554/live`. `rtsp_transport: tcp` is already set;
-   `copy_codec: true` will stream-copy the phone's H.264 into the archive.
-3. `./scripts/stop.sh && ./scripts/start.sh` (without `--no-record` now).
-4. Verify: `data/archive/` grows a new `cam01_*.mp4` every 60 s, and
-   `.run/logs/ingest.log` shows `gated: false` chunks with captions when
-   something moves in frame.
+It offers **mjpeg only** — 1920×1080, 1080×1920, 3840×2160, 1728×3072 — plus an
+HEVC mode this ffmpeg build cannot take over v4l2. So `input_format: mjpeg` is
+mandatory rather than optional, and a plausible-looking resolution the camera
+does not offer is silently substituted. Re-run after any camera change:
 
-Until then, `./scripts/start.sh --no-record` runs against whatever is in
-`data/archive/` — currently the generated test segments (1080p testsrc2 with a
-burned UTC clock and, in the last one, a moving white square that trips the
-gate).
+```bash
+ffmpeg -f v4l2 -list_formats all -i /dev/video0
+```
+
+`recorder.source: /dev/video0` and the `recorder.device` block are already set
+for it; `./scripts/stop.sh && ./scripts/start.sh` is all it takes.
+
+**This replaced an iPhone-over-RTSP source used earlier the same night, and the
+reason is worth keeping.** The phone streamed fine — h264 1440×1080, 1 s
+keyframes, ~6.3 Mbps — over its Personal Hotspot on the USB cable. Then it
+locked, the USB network interface disappeared, and the recorder spent two hours
+correctly retrying a connection to an address that no longer existed. A network
+camera fails in ways a v4l2 device cannot. The RTSP path still works if it is
+ever wanted: set `recorder.source` to the URL, `rtsp_transport: tcp` and
+`copy_codec: true` are already right for it.
+
+`./scripts/start.sh --no-record` still runs against whatever is already in
+`data/archive/`, and `python3 -m services.importer --inbox` pulls a recorded
+video in as a third option.
 
 ## 6. Remaining chores
 
