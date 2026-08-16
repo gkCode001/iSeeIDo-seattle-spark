@@ -635,6 +635,24 @@ agent:
   model_source: default          # default | lmstudio
   host: 0.0.0.0
   port: 8080
+  # Origins allowed to call these endpoints from a browser. Empty = same-origin only,
+  # which is what a browser opened straight at http://127.0.0.1:8080/ is.
+  #
+  # This exists because same-origin is NOT what the demo box actually serves. Reach the
+  # page through a tunnel, an IDE port-forward or a preview pane and every `fetch` in
+  # ui/static/data.js becomes cross-origin. Simple GETs still leave, so the server logs a
+  # cheerful 200 while the browser refuses to hand the body to JS — and a POST carrying
+  # `Content-Type: application/json` is preflighted, which this server answered with 501
+  # until an OPTIONS handler was added. The visible symptom is Ask failing 100% with
+  # "NetworkError when attempting to fetch resource" while the live camera view keeps
+  # updating, because ui/static/live.js loads that through an <img> and images are exempt
+  # from CORS. Nothing in the server log says any of this happened.
+  #
+  # "*" echoes whatever origin asks. On a box whose whole design point is that it runs
+  # with the network off (CLAUDE.md invariant 10) that is a demo convenience, not a
+  # security posture: it lets any page you happen to have open call this API while the
+  # stack is up. Narrow it to the tunnel's origin once you know what that origin is.
+  allowed_origins: ["*"]
   groundedness_gate: true        # SPEC §4.2 — retrieval distance is NOT confidence
   request_timeout_seconds: 30
   temperature: 0.0

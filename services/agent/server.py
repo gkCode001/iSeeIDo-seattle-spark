@@ -755,16 +755,83 @@ class _Handler(BaseHTTPRequestHandler):
             raise ValueError("request body must be a JSON object")
         return parsed
 
+    def _allowed_origin(self) -> str | None:
+        """The value to echo in ``Access-Control-Allow-Origin``, or None to send nothing.
+
+        Same-origin requests carry no ``Origin`` and need no header, so this is dead weight
+        for a browser opened straight at :8080 — which is exactly why its absence went
+        unnoticed. It matters the moment the page is reached through anything that changes
+        the origin: a tunnel, a port-forward, an IDE preview pane, a reverse proxy. Then
+        every ``fetch`` is cross-origin, and a POST carrying ``Content-Type:
+        application/json`` is preflighted.
+        """
+        origin = self.headers.get("Origin")
+        if not origin:
+            return None
+        allowed = config.get("agent.allowed_origins", []) or []
+        if "*" in allowed:
+            # Echo the caller rather than returning "*": the two are equivalent until
+            # something needs credentials, and echoing keeps that door open.
+            return origin
+        return origin if origin in allowed else None
+
+    def _cors_headers(self) -> None:
+        origin = self._allowed_origin()
+        if origin is None:
+            return
+        self.send_header("Access-Control-Allow-Origin", origin)
+        # Without this a proxy may cache one origin's response and serve it to another.
+        self.send_header("Vary", "Origin")
+
     def _send_json(self, status: int, payload: Any) -> None:
         body = json.dumps(payload, default=str).encode("utf-8")
         self.send_response(int(status))
         self.send_header("Content-Type", _JSON)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self._cors_headers()
         self.end_headers()
         self.wfile.write(body)
 
     # -- routing ------------------------------------------------------------------------
+
+    def do_OPTIONS(self) -> None:  # noqa: N802 - stdlib naming
+        """CORS preflight.
+
+        ``BaseHTTPRequestHandler`` answers an unimplemented verb with **501**, and a 501 on
+        the preflight makes the browser drop the real request before it is ever sent. The
+        server logs nothing, because nothing arrived — and Firefox reports it as
+        "NetworkError when attempting to fetch resource", which reads as "the agent is
+        down" while the agent is up and answering every other request.
+
+        The GET panes keep working right through this, which is what makes it so
+        confusing to diagnose: the live view is an ``<img>`` (``ui/static/live.js``) and
+        images are exempt from CORS, so the camera keeps updating while Ask is dead.
+        """
+        origin = self._allowed_origin()
+        if origin is None:
+            # Not an origin we serve. Refuse the preflight rather than 501 on it, so the
+            # browser console says "origin not allowed" instead of "unsupported method".
+            self._send_json(
+                HTTPStatus.FORBIDDEN,
+                {
+                    "detail": (
+                        f"origin {self.headers.get('Origin')!r} is not in "
+                        f"agent.allowed_origins"
+                    )
+                },
+            )
+            return
+        self.send_response(HTTPStatus.NO_CONTENT)
+        self.send_header("Access-Control-Allow-Origin", origin)
+        self.send_header("Vary", "Origin")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Accept")
+        # An ask takes 7-20 s on this box; without a cached preflight every one of them
+        # pays a second round trip first.
+        self.send_header("Access-Control-Max-Age", "86400")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def do_GET(self) -> None:  # noqa: N802 - stdlib naming
         route = urlparse(self.path).path
@@ -933,6 +1000,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         # The whole point is freshness; a cached live view is a still photograph.
         self.send_header("Cache-Control", "no-store, max-age=0")
+        self._cors_headers()
         self.end_headers()
         self.wfile.write(body)
 
@@ -978,6 +1046,7 @@ class _Handler(BaseHTTPRequestHandler):
         if status == HTTPStatus.PARTIAL_CONTENT:
             self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
         self.send_header("Cache-Control", "no-store")
+        self._cors_headers()
         self.end_headers()
         with path.open("rb") as fh:
             fh.seek(start)
