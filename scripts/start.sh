@@ -165,21 +165,37 @@ fi
 # the bad case: build_monitor() refuses, the agent catches that and comes up with M5
 # disabled entirely, and every OTHER standing task stops being evaluated too — announced
 # by one line in agent.log. Fail here instead, where the fix is on screen.
-SEED_NEEDS_DISCORD="$($PY - <<'PY' 2>/dev/null || echo 0
+# Read the LIVE set, not the seed. Since tasks persist to monitor.tasks_store, the tasks
+# that will actually be evaluated are the store's when it exists — checking tasks.yaml
+# alone would miss every Discord task registered through the Watch pane, which is where
+# they get created in practice.
+SEED_NEEDS_DISCORD="$($PY - <<'TASKCHECK' 2>/dev/null || echo 0
+import json
+
 import yaml
+
 from shared import config
 
-try:
+
+def rows():
+    store = config.repo_path("monitor.tasks_store")
+    if store.is_file():
+        payload = json.loads(store.read_text())
+        return payload.get("tasks") if isinstance(payload, dict) else payload
     doc = yaml.safe_load(config.repo_path("monitor.tasks_file").read_text()) or {}
+    return doc.get("tasks") or []
+
+
+try:
+    tasks = rows() or []
 except Exception:
     print(0)
 else:
-    tasks = doc.get("tasks") or []
     print(int(any(
         (t or {}).get("action") == "notify_discord" and (t or {}).get("enabled", True)
         for t in tasks
     )))
-PY
+TASKCHECK
 )"
 
 if [ -n "$AB_SOURCE" ]; then
@@ -190,8 +206,7 @@ if [ -n "$AB_SOURCE" ]; then
         || red "  $AB_URL not answering — notify_discord will fail at fire time"
 elif [ "$SEED_NEEDS_DISCORD" = 1 ]; then
     die "
-A task in config/tasks.yaml uses notify_discord and no ALERTBRIDGE_SERVICE_TOKEN was
-found. Starting anyway would bring the agent up with M5 disabled entirely — every
+A standing task uses notify_discord and no ALERTBRIDGE_SERVICE_TOKEN was found. Starting anyway would bring the agent up with M5 disabled entirely — every
 standing task silently unevaluated, not just that one.
 
     export ALERTBRIDGE_SERVICE_TOKEN=...        # or put it in $ROOT/.env.local
