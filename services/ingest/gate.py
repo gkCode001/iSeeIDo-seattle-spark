@@ -23,6 +23,21 @@ Three decisions that are not obvious
 anything happen", and one second of movement inside five seconds of stillness averages
 away to nothing. The max is what "anything" means.
 
+**The delta is averaged over the area that VARIES, not over the whole frame**
+(``ingest.gate.active_area``). Averaging over every pixel makes the score depend on how
+much of the frame the subject happens to occupy, which is a property of the framing and
+not of the event. Measured on this box, one camera, two clips played on the same screen:
+a 16:9 clip filling the frame moved 743 of 1024 thumbnail pixels and scored a median
+0.0714, while a 9:16 clip letterboxed by the player moved **139** and scored **0.0082** —
+a 9x gap between two scenes with comparable amounts of actual movement, because ~86% of
+the second frame is a static black bar dragging the mean down. Every window of the second
+clip was skipped as "still". Normalising by the varying area closes it to 0.0969 vs
+0.0520; the rest is a real difference (water is gentler than a CCTV cut).
+
+A crop would have fixed that one clip and broken the next, because the bars move with the
+aspect ratio of whatever is playing. Normalising by the varying area needs to know nothing
+about the framing at all.
+
 **The last thumbnail of the previous window is carried forward** as the first reference
 of the next. Windows overlap by 1 s already (SPEC §2.2), but a movement that begins in
 the final frame of a window would otherwise have nothing to be compared against.
@@ -54,6 +69,7 @@ __all__ = [
     "Gate",
     "MotionGate",
     "PassthroughGate",
+    "active_mask",
     "build_gate",
     "mean_abs_delta",
     "motion_score",
@@ -86,6 +102,11 @@ class GateDecision:
     ``score`` is the normalised 0..1 motion figure, or None when no comparison was
     possible. It is kept even for a skip: tuning ``motion_threshold`` means looking at
     the distribution of scores that were just under it.
+
+    ``active_px`` is how many thumbnail pixels the score was averaged over. It is the
+    denominator, so without it a score cannot be compared against one from a differently
+    framed scene — which is the exact confusion that made a letterboxed clip look still.
+    None when the whole frame was used.
     """
 
     passed: bool
@@ -93,6 +114,7 @@ class GateDecision:
     score: float | None = None
     frames: int = 0
     error: str = ""
+    active_px: int | None = None
 
     @property
     def skipped(self) -> bool:
@@ -116,31 +138,67 @@ class Gate(Protocol):
 # --------------------------------------------------------------------------------------
 
 
-def mean_abs_delta(a: bytes, b: bytes) -> float:
+def mean_abs_delta(a: bytes, b: bytes, mask: Sequence[int] | None = None) -> float:
     """Mean absolute difference between two equal-length grayscale buffers, 0..1.
 
     1024 bytes per frame at a handful of frames per window: a Python loop is not the
     bottleneck here, ffmpeg's decode is. ``zip`` over two ``bytes`` objects yields ints,
     so this allocates nothing per pixel.
+
+    ``mask`` restricts both the sum and the divisor to the listed pixel indices — see
+    :func:`active_mask`. Passing None averages over the whole frame, which is the same
+    number this function has always returned.
     """
     if len(a) != len(b):
         raise ValueError(f"thumbnail size mismatch: {len(a)} vs {len(b)} bytes")
     if not a:
         raise ValueError("empty thumbnail; nothing to compare")
-    total = sum(abs(x - y) for x, y in zip(a, b))
-    return total / (len(a) * _GRAY_MAX)
+    if mask is None:
+        return sum(abs(x - y) for x, y in zip(a, b)) / (len(a) * _GRAY_MAX)
+    if not mask:
+        raise ValueError("empty mask; nothing to compare")
+    return sum(abs(a[p] - b[p]) for p in mask) / (len(mask) * _GRAY_MAX)
 
 
-def motion_score(frames: Sequence[bytes]) -> float | None:
+def active_mask(frames: Sequence[bytes], noise_level: int) -> list[int]:
+    """Indices of pixels whose value varies by more than ``noise_level`` across ``frames``.
+
+    This is the frame's *live* area — whatever is genuinely capable of changing during the
+    window. A letterbox bar, a wall, an unlit corner and a bezel all sit still and drop
+    out; a sensor's own grain does too, which is what ``noise_level`` is for and why it is
+    a level rather than a plain "did it change at all".
+
+    Deliberately computed per window rather than learned as a long-lived background model.
+    A background model is the standard answer and it is the wrong one here: this camera is
+    pointed at a screen whose content — and therefore whose static region — changes
+    completely every time a different clip is played, and a model that needs to re-converge
+    after every cut would skip exactly the first seconds of every new scene.
+
+    ``zip(*frames)`` transposes to one tuple per pixel position. At 1024 positions over ~10
+    frames that is ~10k comparisons a window, against ffmpeg's ~200 ms decode — the same
+    argument that keeps the diff itself in pure Python.
+    """
+    if noise_level < 0:
+        raise ValueError(f"noise_level must be >=0, got {noise_level}")
+    return [i for i, column in enumerate(zip(*frames)) if max(column) - min(column) > noise_level]
+
+
+def motion_score(frames: Sequence[bytes], mask: Sequence[int] | None = None) -> float | None:
     """Peak inter-frame delta across a window, or None with fewer than two frames.
 
     Maximum rather than mean: see the module docstring. One frame is not a failure — it
     is a window too short or a decode that gave up early — and the caller turns None into
     a fail-open pass rather than a zero, which would read as "definitely still".
+
+    ``mask`` None averages each delta over the whole frame — the original score, kept so
+    that ``ingest.gate.active_area.enabled: false`` is a genuine revert to the old number
+    rather than a second code path pretending to be one. Deciding *whether* to mask, and
+    what to do about a frame with almost no active area, is policy and lives in
+    :class:`MotionGate`; this function is the arithmetic.
     """
     if len(frames) < 2:
         return None
-    return max(mean_abs_delta(frames[i - 1], frames[i]) for i in range(1, len(frames)))
+    return max(mean_abs_delta(frames[i - 1], frames[i], mask) for i in range(1, len(frames)))
 
 
 def split_thumbnails(raw: bytes, frame_bytes: int) -> list[bytes]:
@@ -244,15 +302,36 @@ class MotionGate:
         # The previous window's last frame is the reference for this one's first, so a
         # movement starting on a boundary is still a comparison rather than a lone frame.
         sequence = frames if self._reference is None else [self._reference, *frames]
-        score = motion_score(sequence)
+        mask: list[int] | None = None
+        active_px: int | None = None
+        if self._s.active_area_enabled and len(sequence) >= 2:
+            mask = active_mask(sequence, self._s.active_area_noise_level)
+            active_px = len(mask)
+
         if frames:
             self._reference = frames[-1]
 
+        if active_px is not None and active_px < self._s.active_area_min_px:
+            # Almost nothing in this frame is capable of varying: a covered lens, a dark
+            # room, a paused player. Score it 0.0 rather than dividing a few grains of
+            # sensor noise by a tiny denominator, which would turn the quietest possible
+            # window into the loudest one. This is a measurement, so it skips — unlike the
+            # fail-open branches above, which are the absence of a measurement.
+            return GateDecision(
+                False, GateReason.STILL, score=0.0, frames=len(frames), active_px=active_px
+            )
+
+        score = motion_score(sequence, mask)
         if score is None:
             return GateDecision(True, GateReason.UNDECODABLE, frames=len(frames))
-        if score >= self._s.motion_threshold:
-            return GateDecision(True, GateReason.MOTION, score=score, frames=len(frames))
-        return GateDecision(False, GateReason.STILL, score=score, frames=len(frames))
+        passed = score >= self._s.motion_threshold
+        return GateDecision(
+            passed,
+            GateReason.MOTION if passed else GateReason.STILL,
+            score=score,
+            frames=len(frames),
+            active_px=active_px,
+        )
 
     # -- internals ----------------------------------------------------------------
 

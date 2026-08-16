@@ -116,6 +116,9 @@ class IngestSettings:
     warmup_windows: int
     target_skip_rate: float
     warn_skip_rate: float
+    active_area_enabled: bool
+    active_area_noise_level: int
+    active_area_min_px: int
 
     # -- SPEC §2.4 captioning ------------------------------------------------------
     overlay_enabled: bool
@@ -190,6 +193,9 @@ class IngestSettings:
             warmup_windows=int(config.get("ingest.gate.warmup_windows")),
             target_skip_rate=float(config.get("ingest.gate.target_skip_rate")),
             warn_skip_rate=float(config.get("ingest.gate.warn_skip_rate")),
+            active_area_enabled=bool(config.get("ingest.gate.active_area.enabled")),
+            active_area_noise_level=int(config.get("ingest.gate.active_area.noise_level")),
+            active_area_min_px=int(config.get("ingest.gate.active_area.min_px")),
             overlay_enabled=bool(config.get("ingest.overlay.enabled")),
             overlay_format=str(config.get("ingest.overlay.format")),
             overlay_position=OverlayPosition(str(config.get("ingest.overlay.position"))),
@@ -246,6 +252,18 @@ class IngestSettings:
             )
         if self.warmup_windows < 0:
             raise IngestError(f"ingest.gate.warmup_windows must be >=0, got {self.warmup_windows}")
+        if not 0 <= self.active_area_noise_level <= 255:
+            raise IngestError(
+                f"ingest.gate.active_area.noise_level is a 0..255 grayscale level; "
+                f"got {self.active_area_noise_level}"
+            )
+        if not 0 <= self.active_area_min_px <= self.thumbnail_bytes:
+            # Above the pixel count every window would score 0.0 and the VLM would never
+            # run again — the exact silent failure this whole block exists to catch.
+            raise IngestError(
+                f"ingest.gate.active_area.min_px must be between 0 and the thumbnail's "
+                f"{self.thumbnail_bytes} pixels, got {self.active_area_min_px}"
+            )
         if self.live_short_side_px <= 0:
             raise IngestError(
                 f"ingest.live_short_side_px must be positive, got {self.live_short_side_px}"

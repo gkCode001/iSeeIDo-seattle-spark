@@ -276,7 +276,67 @@ ingest:
     # asking, so a question costs a spike instead of a permanent debt. p75 of the
     # measured distribution is 0.106 and real events score 0.1+, so this still sits
     # below anything the demo is about.
-    motion_threshold: 0.08
+    # 0.08 -> 0.05 on 2026-08-16, together with `active_area` below, and the two must be
+    # read as one change: normalising the score by the varying area RAISES it for any
+    # scene that does not fill the frame, so keeping 0.08 would have handed back most of
+    # what the normalisation just fixed.
+    #
+    # Measured on this box over 112 windows of real footage, both clips played on the same
+    # screen in front of the same camera (pass rates, normalised score):
+    #
+    #   threshold   16:9 clip (fills frame)   9:16 clip (letterboxed)
+    #     0.03              100%                      96%
+    #     0.05              100%                      54%
+    #     0.06              100%                      27%
+    #     0.08               89%                      16%
+    #
+    # 0.05 is chosen for the 9:16 column: at 0.08 a letterboxed clip captions one window
+    # in six, which for a 15 s event is a coin flip on whether the index ever hears about
+    # it. The 16:9 column is 100% at every threshold that serves the other one — filming a
+    # bright screen puts flicker across the whole frame, so its quietest window still
+    # scores 0.078 — and that is an accepted cost, not an oversight: see the duty-cycle
+    # note below.
+    #
+    # WHAT THIS IS TUNED FOR, because it is narrower than it looks: a camera pointed at a
+    # SCREEN playing clips. Point it back at a room and re-measure — a room's static
+    # furniture drops out of the active mask, so the same 0.05 will be markedly more
+    # sensitive than the 0.08 that was tuned there this morning.
+    #
+    # The duty cycle this implies, at the 7.05 s mean caption this box currently measures
+    # (125 output tokens at 17.8 tok/s) against a 4 s stride: a 16:9 clip captions every
+    # window and ingest runs ~0.6x real time WHILE IT PLAYS, accruing ~45 s of lag a
+    # minute, then drains at ~50 s a minute once the clip ends and the scene goes quiet.
+    # That is affordable for a demo of 30-60 s clips with gaps between them. It is NOT
+    # affordable for continuous footage: point this at a busy room all day and ingest
+    # falls behind forever. The lever there is the caption's output-token count, not this
+    # threshold — see vlm.profiles.live.max_tokens.
+    motion_threshold: 0.05
+    # Average each frame delta over the area that VARIES, not over the whole frame.
+    #
+    # The failure this fixes, measured here: a 9:16 clip letterboxed by the player onto a
+    # 16:9 screen moves 139 of 1024 thumbnail pixels; the other 885 are a static black bar
+    # that drags the mean down ~4x. Median score 0.0082 against a 0.08 threshold, so every
+    # window of that clip was skipped as "still" while the clip showed a child in a
+    # swimming pool. A 16:9 clip on the same screen moved 743 px and scored 0.0714.
+    # Normalising by the varying area: 0.0520 vs 0.0969 — still a real gap (water is
+    # gentler than a CCTV cut), but no longer a gap about ASPECT RATIO.
+    #
+    # A crop was the obvious alternative and is worse: the bars move with whatever clip is
+    # playing next, so the rectangle is stale the moment the demo advances a slide.
+    active_area:
+      enabled: true
+      # A pixel counts as varying if its value spans more than this across the window,
+      # 0..255. Chosen from the same 112 windows: at 8 the mask still admits enough of the
+      # letterbox bar's compression noise to halve the correction (54% -> 18% pass at
+      # 0.05); at 24 the mask gets tight enough that the two clips' medians cross over and
+      # the letterboxed one starts scoring HIGHER, which is over-correction. 16 is the
+      # middle of the range where the two are comparable.
+      noise_level: 16
+      # Below this many varying pixels the window scores 0.0 outright. A near-static frame
+      # would otherwise divide a few grains of sensor noise by a tiny denominator and read
+      # as the loudest window of the run — a covered lens firing the VLM continuously.
+      # 16 of 1024 is 1.5%: smaller than any subject worth captioning at 32x32.
+      min_px: 16
     min_object_confidence: 0.40
     # DeepStream is absent and its sm_121 support unverified, so `motion` ships first:
     # ffmpeg downscales to a tiny grayscale thumbnail (C speed) and the diff is computed

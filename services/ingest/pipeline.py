@@ -385,10 +385,19 @@ class IngestPipeline:
 
         with timed("ingest.gate", window=str(window)) as gate_span:
             decision = self._gate.evaluate(window, spans)
+            # Inside the block: `timed` writes its record on __exit__, so fields set after
+            # the `with` are merged into an object nobody reads again. This update used to
+            # sit below it, which is why no ingest.gate line has ever carried the verdict.
+            gate_span.fields.update(
+                passed=decision.passed,
+                reason=decision.reason.value,
+                score=decision.score,
+                # The denominator the score was averaged over. A score without it cannot
+                # be compared against one from a differently framed scene, which is
+                # exactly how a letterboxed clip read as "still" for twenty minutes.
+                active_px=decision.active_px,
+            )
         self.stats.gate_ms += gate_span.elapsed_ms
-        gate_span.fields.update(
-            passed=decision.passed, reason=decision.reason.value, score=decision.score
-        )
 
         if decision.skipped:
             self.stats.skipped += 1
