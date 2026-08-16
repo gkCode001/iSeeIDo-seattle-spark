@@ -21,6 +21,14 @@ SPARK.watch = (function () {
   var tasks = [];
   var monitor = { tasks: [] };
   var cards = {}; // task_id -> {node, refs}
+  /* The task_id whose inline editor is open, or null. The pane re-renders on a 1 s poll
+   * and render() rebuilds every card from scratch, so without this the editor is
+   * destroyed a second after it opens — the form vanishes mid-keystroke and the card
+   * snaps back to its read-only state. Suspending the rebuild is the right trade: the
+   * funnel readout goes stale for the seconds someone is typing, and it refreshes the
+   * moment they save or cancel. Losing what they typed is not recoverable; a stale
+   * sustain bar is. */
+  var editingTaskId = null;
   var pollTimer = null;
 
   function init(root, config) {
@@ -93,6 +101,8 @@ SPARK.watch = (function () {
   // text and bar widths, so a countdown never blows away a card mid-read.
   // -----------------------------------------------------------------------------------
   function render() {
+    // Never rebuild the list under an open editor — see `editingTaskId`.
+    if (editingTaskId) return;
     els.list.innerHTML = "";
     cards = {};
     if (monitor.generated_at) {
@@ -106,6 +116,134 @@ SPARK.watch = (function () {
       els.list.appendChild(taskCard(task, monitorRow(task.task_id)));
     });
     tickLive();
+  }
+
+  /* The inline editor for one task. Returns {el, reset}; the caller owns placement.
+   *
+   * Only fields the server accepts are offered: PATCH /api/tasks/<id> rejects unknown
+   * keys outright rather than ignoring them, and task_id is not among them. A field here
+   * the server would refuse is a form that lies. */
+  function buildEditor(task, onClose) {
+    var el = document.createElement("form");
+    el.className = "task-editor";
+    el.hidden = true;
+
+    function field(parent, label, hint) {
+      var wrap = document.createElement("label");
+      var head = document.createElement("span");
+      head.textContent = label;
+      if (hint) {
+        var h = document.createElement("span");
+        h.className = "muted";
+        h.textContent = " \u2014 " + hint;
+        head.appendChild(h);
+      }
+      wrap.appendChild(head);
+      parent.appendChild(wrap);
+      return wrap;
+    }
+
+    var describe = document.createElement("input");
+    describe.autocomplete = "off";
+    field(el, "describe", "paid on every caption, twice; re-embedded on save").appendChild(describe);
+
+    var row1 = div("form-row");
+    var win = document.createElement("input");
+    win.type = "number";
+    win.min = "1";
+    field(row1, "window (s)").appendChild(win);
+    var cool = document.createElement("input");
+    cool.type = "number";
+    cool.min = "1";
+    field(row1, "cooldown (s)").appendChild(cool);
+    el.appendChild(row1);
+
+    var row2 = div("form-row");
+    var action = document.createElement("select");
+    ["save_clip", "raise_alert", "file_ticket", "notify_discord"].forEach(function (v) {
+      var o = document.createElement("option");
+      o.value = v;
+      o.textContent = v;
+      action.appendChild(o);
+    });
+    field(row2, "action").appendChild(action);
+    var active = document.createElement("input");
+    active.autocomplete = "off";
+    field(row2, "active (local)").appendChild(active);
+    el.appendChild(row2);
+
+    var foot = div("form-foot");
+    var save = document.createElement("button");
+    save.type = "submit";
+    save.className = "btn";
+    save.textContent = "save";
+    var cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "btn btn--quiet";
+    cancel.textContent = "cancel";
+    var msg = span("form-msg", "");
+    foot.appendChild(save);
+    foot.appendChild(cancel);
+    foot.appendChild(msg);
+    el.appendChild(foot);
+
+    function reset() {
+      describe.value = task.describe;
+      win.value = task.window;
+      cool.value = task.cooldown;
+      action.value = task.action;
+      active.value = task.active;
+      msg.textContent = "";
+      msg.className = "form-msg";
+    }
+
+    cancel.addEventListener("click", onClose);
+
+    el.addEventListener("submit", function (ev) {
+      ev.preventDefault();
+      /* Send only what CHANGED. Restating every field would re-embed `describe` on a
+       * window-only edit, and the embedding is what stage 1 matches on — an unrelated
+       * edit quietly moving the match is not something anyone connects back to it. */
+      var changes = {};
+      if (describe.value.trim() !== task.describe) changes.describe = describe.value.trim();
+      if (parseInt(win.value, 10) !== task.window) changes.window = parseInt(win.value, 10);
+      if (parseInt(cool.value, 10) !== task.cooldown) changes.cooldown = parseInt(cool.value, 10);
+      if (action.value !== task.action) changes.action = action.value;
+      if (active.value.trim() !== task.active) changes.active = active.value.trim();
+
+      function bad(text) {
+        msg.textContent = text;
+        msg.className = "form-msg bad";
+      }
+      if (!Object.keys(changes).length) {
+        msg.textContent = "nothing changed";
+        msg.className = "form-msg";
+        return;
+      }
+      if (changes.describe !== undefined && changes.describe.length < 8)
+        return bad("describe needs real words; it is embedded once and matched forever");
+      if (changes.window !== undefined && !(changes.window > 0))
+        return bad("window must be a positive number of seconds");
+      if (changes.cooldown !== undefined && !(changes.cooldown > 0))
+        return bad("cooldown must be positive \u2014 0 is how you get thirty alerts for one event");
+
+      save.disabled = true;
+      msg.className = "form-msg";
+      msg.textContent = "PATCH \u2026";
+      SPARK.data
+        .patchTask(task.task_id, changes)
+        .then(function () {
+          save.disabled = false;
+          onClose();
+          return refresh();
+        })
+        .catch(function (err) {
+          save.disabled = false;
+          bad(err && err.message ? err.message : String(err));
+        });
+    });
+
+    return { el: el, reset: reset };
   }
 
   function taskCard(task, row) {
@@ -150,10 +288,46 @@ SPARK.watch = (function () {
     });
     card.appendChild(del);
 
+    /* Edit. Deliberately NOT a second "define a task" form: task_id is the cooldown and
+     * dedupe key (SPEC §6.4) and the server refuses to change it, so a full form would
+     * offer a field that cannot be edited. This edits exactly the five fields PATCH
+     * accepts, in place on the card, next to the funnel readout that shows what the edit
+     * did.
+     *
+     * `describe` is the one that matters most and the one people get wrong. Every word
+     * of it is paid on EVERY captioned window, twice: prefill in the caption's watchlist
+     * checklist, and decode in the verdict the model writes back. It is also embedded
+     * once for stage 1, so saving re-embeds and changes what matches from the next chunk
+     * on. The hint under the field says so, because that cost is otherwise invisible. */
+    var edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "task-edit";
+    edit.title = "edit this standing task";
+    edit.setAttribute("aria-label", "edit task " + task.task_id);
+    edit.textContent = "✎";
+    card.appendChild(edit);
+
     var desc = document.createElement("p");
     desc.className = "task-describe";
     desc.textContent = "“" + task.describe + "”";
     card.appendChild(desc);
+
+    var editor = buildEditor(task, function () {
+      editor.el.hidden = true;
+      desc.hidden = false;
+      edit.disabled = false;
+      // Let the poll resume BEFORE any refresh() the caller runs, or the refresh it
+      // triggers on save would return early and the card would keep the old values.
+      if (editingTaskId === task.task_id) editingTaskId = null;
+    });
+    card.appendChild(editor.el);
+    edit.addEventListener("click", function () {
+      editor.reset();
+      editor.el.hidden = false;
+      desc.hidden = true;
+      edit.disabled = true;
+      editingTaskId = task.task_id;
+    });
 
     var meta = div("task-meta");
     meta.appendChild(span("", activeLabel(task.active)));
