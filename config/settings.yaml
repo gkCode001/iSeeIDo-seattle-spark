@@ -327,16 +327,29 @@ vlm:
     # Raising max_tokens was the alternative and is the worse trade: decode is ~95% of
     # cost (SPEC §2.4), so 80 -> 160 tokens roughly doubles caption latency and halves
     # the headroom the deep worker shares. Recovering the wasted quarter is free.
+    #
+    # SHORTENED 2026-08-16, because the length was silently disarming the Watch surface.
+    # The watchlist block below is appended as the caption's LAST line and
+    # `shared/captions.split_caption` requires it there — description is everything
+    # before the header. So when a four-to-six-sentence description meets the live token
+    # cap, the part that gets truncated away is the VERDICTS. Measured: only 3 of 25
+    # captions carried a WATCHING block, and a caption without one does not fail loudly
+    # — M5 stage 1 falls back to cosine over the prose, which scores the ABSENT tasks
+    # above the present one. A standing task that can never fire, with nothing in any log
+    # saying so.
+    #
+    # Two to three sentences leaves room for the verdicts inside the budget. The detail
+    # that goes missing is recoverable — the deep worker re-watches at 4 fps — while a
+    # missing verdict is not recoverable at all, because nothing re-reads the footage on
+    # the Watch path until a task has already promoted.
     caption: >-
-      Describe this moment in four to six sentences. Be specific and concrete — this
+      Describe this moment in two to three sentences. Be specific and concrete — this
       text is the ONLY record of the moment once the window closes, and a later search
       has nothing else to match on.
       (1) The people: how many, and for EACH of them what they are doing, what they are
-      holding or touching, and where they are looking.
+      holding, and where they are looking.
       (2) What they are wearing: colours and distinctive items.
-      (3) The objects and surroundings that matter — furniture, screens, doors,
-      vehicles — and where people are relative to them.
-      (4) What CHANGES across the frames: who moves, what enters or leaves, what is
+      (3) What CHANGES across the frames: who moves, what enters or leaves, what is
       picked up or put down. Say explicitly if nothing moves.
       No preamble: do not open with "This image", "The scene shows" or "appears to be".
       Do NOT describe or quote the timestamp burned into the frame.
@@ -409,7 +422,19 @@ vlm:
       # actually afford once the gate stops skipping. Captions get terser; that is the
       # trade being made, deliberately, to keep the index current with the camera. A
       # caption that arrives 15 minutes late describes footage nobody can ask about.
-      max_tokens: 96
+      # 96 was too tight once the watchlist block is counted: the verdicts are the
+      # caption's last line, so they are the first thing a truncation removes. 144 was
+      # still not enough — only 4 of 12 captions carried the block, because the checklist
+      # QUOTES EACH TASK VERBATIM and the tasks registered on this box are long ("A
+      # person appear intruder, holding dangerous items like gun, knife, harming other,
+      # in pubic place etc."). Three of those is ~45 output tokens before a word of
+      # description.
+      #
+      # 200 is sized from that measurement, not from taste. The cheaper alternative is
+      # shorter task descriptions — every word of a task's `describe` is paid on EVERY
+      # captioned window, twice (prefill in the checklist, decode in the verdict), which
+      # is worth knowing before writing a task like an incident report.
+      max_tokens: 200
       temperature: 0.0
       request_timeout_seconds: 30   # expected ~2 s. Anything near this is pathological.
     deep:
