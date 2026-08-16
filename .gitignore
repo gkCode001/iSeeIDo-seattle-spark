@@ -39,6 +39,7 @@ data/watchlist.json
 data/inbox/
 !data/inbox/.gitkeep
 data/testclips/
+demo_videos/
 
 # Secrets for services this repo CALLS but does not own — currently just
 # ALERTBRIDGE_SERVICE_TOKEN, which scripts/start.sh sources from here when it is not
