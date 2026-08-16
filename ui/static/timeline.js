@@ -25,6 +25,7 @@ SPARK.timeline = (function () {
     raise_alert: "⚠",
     file_ticket: "🎫",
     save_clip: "⧉",
+    notify_discord: "💬",
   };
 
   function init(root, config) {

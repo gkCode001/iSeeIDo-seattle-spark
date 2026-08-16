@@ -48,10 +48,11 @@ from urllib.parse import parse_qs, unquote, urlparse
 from services.index import IndexStore, build_index
 from services.ingest.watchlist import write_watchlist
 from services.mcp import ActionServer, ClipCutter, NullClipCutter, build_clip_plan, clip_path_for
+from services.mcp.alertbridge import AlertBridgeNotConfigured
 from services.retention import RetentionSettings, apply_retention, plan_retention
 from shared import config, lmstudio, timecode
 from shared.lmstudio import LMStudioError
-from shared.schema import DeepJob, JobState, Tier, from_iso, to_iso, utcnow
+from shared.schema import ActionKind, DeepJob, JobState, Tier, from_iso, to_iso, utcnow
 
 from .agent import AskAgent
 from .deep import JobRegistry, JobUpdate, UnavailableAnalyzer, WorkerAnalyzer
@@ -428,6 +429,17 @@ class AgentApp:
             task = task_from_payload(body)
         except ValueError as exc:
             return HTTPStatus.BAD_REQUEST, {"detail": str(exc)}
+        # A task that reaches off this box is refused here, at the form, if it could not
+        # actually send. build_monitor() preflights the same thing for seed tasks, but a
+        # task registered at runtime never passes through it: it would register cleanly,
+        # show as armed on the Watch pane, and then fire nothing — the send fails, and a
+        # definite failure writes no action-log row, so there is not even a trace of it
+        # on the Timeline. Loud now beats silent later.
+        if task.enabled and task.action is ActionKind.NOTIFY_DISCORD:
+            try:
+                self.actions.discord.preflight()
+            except AlertBridgeNotConfigured as exc:
+                return HTTPStatus.BAD_REQUEST, {"detail": str(exc)}
         try:
             registered = self.tasks.register(task)
         except DuplicateTaskError as exc:

@@ -314,9 +314,7 @@ class IndexStore:
         ranked = self._reranker.rank(
             query, [split_caption(c.record.caption).description for c in candidates]
         )
-
-        hits: list[SearchHit] = []
-        for rank, (position, score) in enumerate(ranked[:top_n]):
+        for position, _ in ranked:
             if not 0 <= position < len(candidates):
                 # A reranker that indexes outside the passages it was given is a bug we
                 # cannot paper over — the wrong caption would be attributed to the wrong
@@ -325,6 +323,10 @@ class IndexStore:
                     f"reranker returned passage index {position} for "
                     f"{len(candidates)} candidates"
                 )
+        ranked = self._blend_recency(ranked, candidates)
+
+        hits: list[SearchHit] = []
+        for rank, (position, score) in enumerate(ranked[:top_n]):
             candidate = candidates[position]
             hits.append(
                 SearchHit(
@@ -335,6 +337,47 @@ class IndexStore:
                 )
             )
         return hits
+
+    def _blend_recency(
+        self, ranked: list[tuple[int, float]], candidates: list[ScoredChunk]
+    ) -> list[tuple[int, float]]:
+        """Reorder ``ranked`` so newer candidates win ties and near-ties.
+
+        Returns the same ``(position, score)`` pairs, resorted. The score is left as the
+        reranker produced it: ``SearchHit.rerank_score`` promises the reranker's opinion,
+        and quietly returning a blended number there would make the §4.2 warning about
+        not reading it as confidence harder to honour, not easier.
+
+        Both terms are min-max normalised over the candidate set before blending, because
+        the two rerankers are not on one scale — ``LexicalReranker`` is bounded in [0, 1]
+        and a NIM ``logit`` is unbounded and often negative. Normalising is what lets one
+        ``recency_weight`` mean the same thing on both.
+        """
+        weight = self._s.recency_weight
+        half_life = self._s.recency_half_life_seconds
+        if weight <= 0.0 or half_life <= 0.0 or len(ranked) < 2:
+            return ranked
+
+        # Newest candidate, not wall clock — see the config comment. An explicit past
+        # range would otherwise score every candidate as equally old.
+        reference = max(candidates[position].record.t_end for position, _ in ranked)
+
+        scores = [score for _, score in ranked]
+        low, high = min(scores), max(scores)
+        span = high - low
+
+        blended: list[tuple[float, int, int, float]] = []
+        for order, (position, score) in enumerate(ranked):
+            relevance = (score - low) / span if span > 0 else 0.5
+            age = max(0.0, (reference - candidates[position].record.t_end).total_seconds())
+            recency = 0.5 ** (age / half_life)
+            combined = (1.0 - weight) * relevance + weight * recency
+            blended.append((combined, order, position, score))
+
+        # Ties fall back to the reranker's original order, same rule as the reranker's own
+        # fallback to ANN order.
+        blended.sort(key=lambda item: (-item[0], item[1]))
+        return [(position, score) for _, _, position, score in blended]
 
     def fetch(self, chunk_ids: list[str], *, with_embedding: bool = False) -> list[ChunkRecord]:
         """Look up records by id, gated ones included. Order follows ``chunk_ids``."""

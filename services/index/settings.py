@@ -101,6 +101,8 @@ class IndexSettings:
     # --- retrieval ---------------------------------------------------------------
     ann_k: int
     rerank_top_n: int
+    recency_weight: float
+    recency_half_life_seconds: float
 
     # --- browse (listing, not retrieval) ------------------------------------------
     browse_scan_batch: int
@@ -149,6 +151,10 @@ class IndexSettings:
             rerank_timeout=float(_pending("index.rerank.timeout_seconds")),  # type: ignore[arg-type]
             ann_k=int(config.get("index.search.ann_k")),
             rerank_top_n=int(config.get("index.search.rerank_top_n")),
+            recency_weight=float(config.get("index.search.recency_weight")),
+            recency_half_life_seconds=float(
+                config.get("index.search.recency_half_life_seconds")
+            ),
             browse_scan_batch=int(config.get("index.browse.scan_batch")),
             rollup_enabled=bool(config.get("index.rollup.enabled")),
             rollup_window_seconds=int(config.get("index.rollup.window_seconds")),
