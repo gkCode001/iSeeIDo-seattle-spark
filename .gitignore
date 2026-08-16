@@ -39,3 +39,10 @@ data/watchlist.json
 data/inbox/
 !data/inbox/.gitkeep
 data/testclips/
+
+# Secrets for services this repo CALLS but does not own — currently just
+# ALERTBRIDGE_SERVICE_TOKEN, which scripts/start.sh sources from here when it is not
+# already exported. No token, webhook URL or credential belongs in git: the code reads
+# them from the process environment only (services/mcp/alertbridge.py).
+.env.local
+.env

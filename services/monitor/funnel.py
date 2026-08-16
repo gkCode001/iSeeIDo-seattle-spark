@@ -57,7 +57,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from shared.captions import CaptionParts, split_caption
-from shared.schema import ChunkRecord, DeepJob, JobState, Task, utcnow
+from shared.schema import ActionKind, ChunkRecord, DeepJob, JobState, Task, utcnow
 
 from services.index.embedding import Embedder, build_embedder
 from services.index.settings import IndexSettings
@@ -799,15 +799,31 @@ def build_monitor(
     registry = TaskRegistry(embedder)
     if load_seed:
         registry.load_seed(resolved.tasks_file)
+    action_server = actions or ActionServer(clock=clock)
+    _preflight_external_actions(registry, action_server)
     return Monitor(
         registry=registry,
-        actions=actions or ActionServer(clock=clock),
+        actions=action_server,
         confirmer=build_confirmer(resolved),
         embedder=embedder,
         settings=resolved,
         verifier=verifier,
         clock=clock,
     )
+
+
+def _preflight_external_actions(registry: TaskRegistry, actions: ActionServer) -> None:
+    """Refuse to start with a task that reaches off this box and cannot.
+
+    Checked here, at construction, rather than at fire time. A missing AlertBridge token
+    discovered when an alert fires means the alert is gone and the operator learns about
+    it from the silence — while the Watch pane showed the task armed the whole time.
+    """
+    needs_discord = any(
+        task.enabled and task.action is ActionKind.NOTIFY_DISCORD for task in registry.tasks()
+    )
+    if needs_discord:
+        actions.discord.preflight()
 
 
 class _MonitorRegistry:

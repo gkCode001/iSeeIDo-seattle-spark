@@ -106,6 +106,11 @@ class ActionKind(str, Enum):
     SAVE_CLIP = "save_clip"
     RAISE_ALERT = "raise_alert"
     FILE_TICKET = "file_ticket"
+    #: Posts to a Discord channel through AlertBridge (services/mcp/alertbridge.py). The
+    #: only action with an effect outside this box, which is why it is the one that most
+    #: needs the brakes in front of it: a message cannot be un-posted, and thirty of them
+    #: for one event is the SPEC §6.4 failure mode with an audience.
+    NOTIFY_DISCORD = "notify_discord"
 
     @property
     def reaches_a_human(self) -> bool:

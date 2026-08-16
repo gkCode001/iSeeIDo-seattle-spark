@@ -35,9 +35,11 @@ from shared.schema import (
     ActionLogEntry,
     ActionStatus,
     Task,
+    to_iso,
     utcnow,
 )
 
+from services.mcp.alertbridge import AlertBridgeClient, idempotency_key
 from services.mcp.brakes import Brake, BrakeDecision, check_brakes, originating_entries
 from services.mcp.clips import (
     ClipCutter,
@@ -57,6 +59,18 @@ logger = logging.getLogger("mcp.actions")
 #: constructor arguments so a caller can override without touching code.
 _FFMPEG_BIN_SETTING = "recorder.ffmpeg_bin"
 _CLIP_TIMEOUT_SETTING = "recorder.clip_timeout_seconds"
+
+
+@dataclass(frozen=True)
+class _DiscordOutcome:
+    """What one Discord submission means for the action log.
+
+    ``recorded`` False is the interesting case: nothing was posted and nothing should be
+    written, so the next matching chunk can try again under the same derived key.
+    """
+
+    reason: str
+    recorded: bool
 
 
 @dataclass(frozen=True)
@@ -133,6 +147,7 @@ class ActionServer:
         clip_cutter: ClipCutter | None = None,
         clip_container: str | None = None,
         copy_codec: bool | None = None,
+        discord_client: AlertBridgeClient | None = None,
     ) -> None:
         self.log = ActionLog(
             log_path if log_path is not None else config.repo_path("paths.action_log")
@@ -161,6 +176,9 @@ class ActionServer:
         self._id_factory = id_factory or (lambda: uuid.uuid4().hex[:12])
         self._segment_resolver = segment_resolver
         self._clip_cutter = clip_cutter or NullClipCutter()
+        #: Built on first use by the ``discord`` property. Tests and callers that want a
+        #: different transport assign it directly.
+        self._discord: AlertBridgeClient | None = discord_client
         #: Instance-local telemetry for the Watch pane. Not a source of truth — the log
         #: is. Deliberately not persisted, because a second store would drift from it.
         self.stats: dict[str, int] = {
@@ -215,6 +233,35 @@ class ActionServer:
         """Reaches a human: fires provisionally as ``UNVERIFIED``, amended on stage 3."""
         return self.fire(
             ActionKind.RAISE_ALERT,
+            t_start,
+            t_end,
+            task=task,
+            task_id=task_id,
+            reason=reason,
+            job_id=job_id,
+            cooldown_seconds=cooldown_seconds,
+        )
+
+    def notify_discord(
+        self,
+        t_start: datetime,
+        t_end: datetime,
+        *,
+        task: Task | None = None,
+        task_id: str | None = None,
+        reason: str = "",
+        job_id: str | None = None,
+        cooldown_seconds: float | None = None,
+    ) -> ActionResult:
+        """Posts to Discord through AlertBridge. Reaches a human, off this box.
+
+        The send happens *after* the brakes have allowed the action and *before* the log
+        entry is appended, so the entry can record what actually happened to the message
+        — including a failure. There is no path that posts without a log row and none
+        that logs a send that was never attempted.
+        """
+        return self.fire(
+            ActionKind.NOTIFY_DISCORD,
             t_start,
             t_end,
             task=task,
@@ -294,6 +341,26 @@ class ActionServer:
                 return self._suppressed(action, resolved_task_id, t_start, t_end, decision)
 
             clip_path = self._cut_clip(t_start, t_end)
+            if action is ActionKind.NOTIFY_DISCORD:
+                # Inside the lock, deliberately, and for the same reason the clip cut is:
+                # the brake decision and the irreversible effect must not be separable by
+                # another thread. It is bounded by mcp.discord.timeout_seconds and never
+                # raises, so the worst case is a slow fire, not a wedged M3/M5.
+                sent = self._notify_discord(resolved_task_id, t_start, t_end, reason)
+                reason = sent.reason
+                if not sent.recorded:
+                    # A definite failure — 429, 5xx, a refused connection. Nothing was
+                    # posted, so nothing is logged and no cooldown is consumed: writing a
+                    # row here would let the dedupe brake block the retry and turn a
+                    # transient rate limit into a permanently lost alert. M5 asks again on
+                    # the next matching chunk, which is the retry, with the same derived
+                    # key. An outcome we cannot know (503, timeout) is NOT this case — it
+                    # is recorded, because the message may well have been delivered.
+                    return ActionResult(
+                        fired=False,
+                        detail=sent.reason,
+                        engaged_brakes=(),
+                    )
             entry = ActionLogEntry(
                 entry_id=self._id_factory(),
                 ts=now,
@@ -535,6 +602,66 @@ class ActionServer:
             copy_codec=self.copy_codec,
         )
         return self._clip_cutter.cut(plan)
+
+    # ----------------------------------------------------------------------------------
+    # Discord, through AlertBridge
+    # ----------------------------------------------------------------------------------
+
+    @property
+    def discord(self) -> AlertBridgeClient:
+        """Lazily built so a process that never notifies never reads the environment."""
+        if self._discord is None:
+            self._discord = AlertBridgeClient()
+        return self._discord
+
+    def _notify_discord(
+        self, task_id: str | None, t_start: datetime, t_end: datetime, reason: str
+    ) -> _DiscordOutcome:
+        """Send the message and report what to do about it.
+
+        ``reason`` is what lands in the action log and therefore in the Timeline pane, so
+        it says what actually happened — "discord submitted (audit 7)", or the failure. A
+        row that reads like a delivered alert when nothing was sent is worse than no row.
+
+        ``recorded`` is False only for a *definite* failure, where nothing reached the
+        channel and the event should stay retryable.
+        """
+        result = self.discord.send(
+            self._discord_text(task_id, t_start, t_end, reason),
+            idempotency_key(task_id, t_start, t_end),
+        )
+        fields = {
+            "task_id": task_id,
+            "status": result.status,
+            "audit_id": result.audit_id,
+            "replayed": result.replayed,
+            "outcome_unknown": result.outcome_unknown,
+            "detail": result.detail,
+        }
+        if result.ok:
+            # NOT "delivered": 202 means AlertBridge accepted the submission, and nothing
+            # here can see a Discord client render it.
+            logger.info("discord alert submitted", extra={"fields": fields})
+        else:
+            logger.error("discord alert not submitted", extra={"fields": fields})
+        return _DiscordOutcome(
+            reason=f"{reason} · {result.summary()}" if reason else result.summary(),
+            recorded=result.ok or result.outcome_unknown,
+        )
+
+    def _discord_text(
+        self, task_id: str | None, t_start: datetime, t_end: datetime, reason: str
+    ) -> str:
+        """The message body. Times are UTC and explicit — the reader is not on this box."""
+        template = str(config.get("mcp.discord.text_template"))
+        return template.format(
+            task_id=task_id or "ad-hoc",
+            t_start=to_iso(t_start),
+            t_end=to_iso(t_end),
+            seconds=round((t_end - t_start).total_seconds(), 1),
+            reason=reason or "(no stage-2 reason recorded)",
+            camera_id=self.camera_id,
+        )
 
 
 def ffmpeg_cutter_from_config() -> FfmpegClipCutter:

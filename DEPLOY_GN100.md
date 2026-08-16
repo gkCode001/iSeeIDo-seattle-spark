@@ -85,6 +85,43 @@ edits are needed on a fresh pull. The load-bearing entries, and why:
 - `index.store.backend: memory` with `memory_path` set — M1/M3/M5 are separate
   processes sharing the corpus through that file. Null it and every question
   retrieves nothing.
+- `mcp.discord.base_url: http://100.127.233.98:8081` — AlertBridge, over
+  Tailscale. See below; it is the one endpoint here that needs a credential.
+
+### AlertBridge — the third service, and the only one needing a secret
+
+`notify_discord` posts through **AlertBridge**, a separate service on this host
+(`/opt/alertbridge`, port 8081) that owns the Discord webhook. This repo holds no
+webhook URL and no token: `services/mcp/alertbridge.py` reads
+`ALERTBRIDGE_SERVICE_TOKEN` from the process environment and nowhere else.
+
+`scripts/start.sh` §2 loads it, in this order, and exports it so the agent — and
+M5 inside it — inherit it:
+
+1. `$ALERTBRIDGE_SERVICE_TOKEN` if already exported (a rotated credential or a
+   different tailnet needs no edit anywhere).
+2. `$SPARK_ALERTBRIDGE_ENV`, if set.
+3. `.env.local` in the repo root — **gitignored**, and the right place for it.
+4. `/opt/alertbridge/.env`, which is where it lives on this box today.
+
+Without a token, `start.sh` warns and continues; the agent then refuses
+`notify_discord` at task creation with the fix in the message. The one case it
+**stops** on is an enabled `notify_discord` task in `config/tasks.yaml` with no
+token: `build_monitor` raises, `services/agent/server.py`'s `_build_monitor`
+catches it and comes up with **M5 disabled entirely** — every other standing task
+silently unevaluated, announced by a single line in `agent.log`. Better to fail
+on the terminal.
+
+Two things this path does not do, deliberately. It never retries a send — the
+idempotency key is derived from the footage range, so a retry under a fresh key
+is how one alert becomes two. And a *definite* send failure writes no action-log
+row, keeping the event retryable on the next matching chunk; the consequence is
+that a missing token looks exactly like nothing ever matching, which is why it is
+checked at startup. Check the service without credentials:
+
+```bash
+curl -fsS http://100.127.233.98:8081/health/live
+```
 
 ## 4. Measured on this box, 2026-08-15
 

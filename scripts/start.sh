@@ -123,7 +123,89 @@ fi
 green "  both serving — this script starts no model process (invariant 1)"
 
 # --------------------------------------------------------------------------------------
-# 2. Recorder — writes data/archive continuously, independent of any AI (SPEC §2.1)
+# 2. AlertBridge — the credential notify_discord needs, which this repo does not hold
+# --------------------------------------------------------------------------------------
+# `notify_discord` posts through AlertBridge, a separate service that owns the Discord
+# webhook. Nothing here or in git holds a webhook URL or a token: alertbridge.py reads
+# ALERTBRIDGE_SERVICE_TOKEN from the process environment and nowhere else, deliberately.
+# This block's whole job is to make sure the environment HAS it before the agent is
+# launched — an exported token is inherited by the agent, and by M5 running inside it.
+#
+# Getting this wrong is quiet in both directions, which is why it is checked here with
+# everything else a human must fix rather than discovered mid-demo:
+#
+#   * At task-creation time the form rejects notify_discord outright.
+#   * At fire time a send failure writes NO action-log row (by design — the event must
+#     stay retryable), so a missing token looks exactly like nothing ever matching.
+#
+# Precedence is deliberate: an already-exported token wins, so a rotated credential or a
+# different tailnet needs no edit here.
+step "AlertBridge (notify_discord)"
+AB_URL="$($PY -c 'from shared.config import get; print(get("mcp.discord.base_url"))' 2>/dev/null || echo "")"
+AB_SOURCE=""
+if [ -n "${ALERTBRIDGE_SERVICE_TOKEN:-}" ]; then
+    AB_SOURCE="the environment"
+else
+    for AB_ENV in "${SPARK_ALERTBRIDGE_ENV:-}" "$ROOT/.env.local" /opt/alertbridge/.env; do
+        [ -n "$AB_ENV" ] && [ -r "$AB_ENV" ] || continue
+        # Only this one key is read. Anchored on '=' so the audit and HMAC tokens
+        # sitting next to it in the same file cannot be picked up by mistake.
+        AB_TOKEN="$(sed -n 's/^ALERTBRIDGE_SERVICE_TOKEN=//p' "$AB_ENV" | head -1 \
+                    | sed -e 's/^["'"'"']//' -e 's/["'"'"']$//')"
+        if [ -n "$AB_TOKEN" ]; then
+            export ALERTBRIDGE_SERVICE_TOKEN="$AB_TOKEN"
+            AB_SOURCE="$AB_ENV"
+            unset AB_TOKEN
+            break
+        fi
+    done
+fi
+
+# Does anything actually REQUIRE it? A seed task that notifies Discord with no token is
+# the bad case: build_monitor() refuses, the agent catches that and comes up with M5
+# disabled entirely, and every OTHER standing task stops being evaluated too — announced
+# by one line in agent.log. Fail here instead, where the fix is on screen.
+SEED_NEEDS_DISCORD="$($PY - <<'PY' 2>/dev/null || echo 0
+import yaml
+from shared import config
+
+try:
+    doc = yaml.safe_load(config.repo_path("monitor.tasks_file").read_text()) or {}
+except Exception:
+    print(0)
+else:
+    tasks = doc.get("tasks") or []
+    print(int(any(
+        (t or {}).get("action") == "notify_discord" and (t or {}).get("enabled", True)
+        for t in tasks
+    )))
+PY
+)"
+
+if [ -n "$AB_SOURCE" ]; then
+    green "  token loaded from $AB_SOURCE"
+    # Unauthenticated liveness probe — sends nothing, posts nothing.
+    curl -sf -o /dev/null "$AB_URL/health/live" 2>/dev/null \
+        && green "  $AB_URL reachable" \
+        || red "  $AB_URL not answering — notify_discord will fail at fire time"
+elif [ "$SEED_NEEDS_DISCORD" = 1 ]; then
+    die "
+A task in config/tasks.yaml uses notify_discord and no ALERTBRIDGE_SERVICE_TOKEN was
+found. Starting anyway would bring the agent up with M5 disabled entirely — every
+standing task silently unevaluated, not just that one.
+
+    export ALERTBRIDGE_SERVICE_TOKEN=...        # or put it in $ROOT/.env.local
+    curl -fsS $AB_URL/health/live               # check the service first
+
+Nothing was started."
+else
+    printf '  no token found — notify_discord tasks will be refused at creation\n'
+    printf '  fix: export ALERTBRIDGE_SERVICE_TOKEN=... or put it in %s\n' "$ROOT/.env.local"
+    printf '  every other action (save_clip, raise_alert, file_ticket) is unaffected\n'
+fi
+
+# --------------------------------------------------------------------------------------
+# 3. Recorder — writes data/archive continuously, independent of any AI (SPEC §2.1)
 # --------------------------------------------------------------------------------------
 if [ "$RECORD" = 1 ]; then
     step "Recorder ($SOURCE)"
@@ -142,7 +224,7 @@ else
 fi
 
 # --------------------------------------------------------------------------------------
-# 3. Ingest — gate + caption + index (SPEC §2.2-§2.4)
+# 4. Ingest — gate + caption + index (SPEC §2.2-§2.4)
 # --------------------------------------------------------------------------------------
 step "Ingest (gate + caption)"
 if pgrep -f "services\.ingest" >/dev/null; then
@@ -157,7 +239,7 @@ else
 fi
 
 # --------------------------------------------------------------------------------------
-# 4. Agent + UI
+# 5. Agent + UI
 # --------------------------------------------------------------------------------------
 step "Ask agent + UI (port $UI_PORT)"
 if curl -sf -o /dev/null "http://127.0.0.1:$UI_PORT/api/config" 2>/dev/null; then
