@@ -1038,6 +1038,19 @@ class _Server(ThreadingHTTPServer):
 
     daemon_threads = True
     allow_reuse_address = True
+    #: The kernel's accept queue. ``socketserver`` defaults this to **5**, which this
+    #: page overruns on its own: the console polls /api/live.jpg twice a second and
+    #: /api/tasks + /api/monitor/state once, holds a WebSocket open, and then adds a
+    #: multi-second POST /api/ask on top. Every connection that arrives while the queue
+    #: is full is dropped by the kernel before the server ever sees it — so there is no
+    #: log line, no 500, nothing on this side at all. The browser reports it as
+    #: "NetworkError when attempting to fetch resource", which reads as "the agent is
+    #: down" when the agent is fine and answering.
+    #:
+    #: Measured here 2026-08-16: an unrelated container was also probing :8080 with TLS
+    #: handshakes (788 of them, all 400s), and a backlog of 5 has no room for both that
+    #: and a demo.
+    request_queue_size = 128
 
 
 class AskServer:
