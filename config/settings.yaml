@@ -169,9 +169,34 @@ ingest:
     max_items: 8
 
   window_seconds: 5              # latency floor is "wait for the window to close"
-  stride_seconds: 4              # 1 s overlap so a boundary event is not halved
-  sample_fps: 1                  # -> 5 frames per window
-  live_short_side_px: 512        # KV-cache pressure dial, NOT a speed dial (SPEC §2.5)
+  # The real-time budget in one number: ingest must finish a window in less than a
+  # stride, or it falls behind the camera and never catches up.
+  #
+  # Left at 4 on 2026-08-16 after trying 6. `IngestSettings.validate` refuses a stride
+  # longer than the window, and it is right to: 6 s of stride against a 5 s window
+  # leaves a 1 s hole that no analysis window covers and that nothing in the index would
+  # show. Widening the stride means widening the window with it, which changes what a
+  # caption describes — a real decision, not a knob to turn while chasing a lag. The
+  # cheaper dial was the token cap above.
+  stride_seconds: 4
+  # -> 3 frames per window (was 1 fps / 5 frames). The caption prompt is dominated by
+  # IMAGE tokens, not text: 5 frames at 512px measured 4181 prompt tokens on this model,
+  # so two fewer frames is roughly a third off every captioned window's prefill. Measured
+  # 2026-08-16 while ingest was 82 s behind the camera and losing ground at 0.70x real
+  # time; the gate could not help because a room with people in it has motion in nearly
+  # every window (38% skipped, against the ~78% these budgets assume).
+  #
+  # What it costs: a 5 s window sampled at 0.6 fps is a frame every ~1.7 s, so a gesture
+  # that starts and finishes between two frames is not described. That is the honest
+  # trade — SPEC §2.4 already treats the caption as lossy on purpose, and the deep worker
+  # re-watches at 4 fps when a question needs what the caption dropped.
+  sample_fps: 0.6
+  # KV-cache pressure dial (SPEC §2.5) — and, at these frame counts, a prefill dial too:
+  # image tokens scale with AREA, so 512 -> 384 is 44% fewer of them per frame. Lowered
+  # 2026-08-16 as the last step of getting ingest back to real time; the overlay is still
+  # burned after the resize and stays legible at this size (invariant 8), which is the
+  # constraint that actually bounds this number.
+  live_short_side_px: 384
 
   overlay:
     # Burned AFTER the resize. The VLM reads it for temporal localization; if it goes
@@ -225,7 +250,33 @@ ingest:
     enabled: true
     target_skip_rate: 0.80       # aim: >=80% of windows never reach the VLM
     warn_skip_rate: 0.60         # below this the gate is mistuned and real-time is gone
-    motion_threshold: 0.02       # mean absolute inter-frame delta, 0..1
+    # Mean absolute inter-frame delta, 0..1. Raised 0.02 -> 0.05 on 2026-08-16, from the
+    # measured distribution rather than by feel. Over 44 judged windows of this room:
+    #
+    #   p25 0.0036   p50 0.0237   p60 0.0332   p70 0.0692   p75 0.1062   p90 0.1748
+    #
+    #   threshold  0.02 -> 48% skipped    0.04 -> 64%
+    #              0.03 -> 57%            0.05 -> 68%     0.06 -> 68%
+    #
+    # 0.04-0.06 all land on 68% because the scores JUMP there: below ~0.05 is a room
+    # settling — a chair, a hand, compression noise — and real events (someone entering,
+    # walking past, waving) score 0.1 and up. Cutting in that gap buys 20 points of skip
+    # rate without touching anything the demo is about.
+    #
+    # This is the number CLAUDE.md means by "prefer deleting work over parallelizing it":
+    # at ~9 s a caption on a busy scene, 48% skipped is 0.80x real time and a lag that
+    # grows forever, while 68% is comfortably inside the 4 s stride. Watch it in the
+    # ingest summary — `skip_rate` under warn_skip_rate means the gate has stopped
+    # earning its place and real time is gone.
+    #
+    # 0.05 -> 0.08 on the same evening, for a different reason than the first raise. At
+    # 0.05 ingest held 0.94x real time: stable while idle, but every ask-surface
+    # escalation takes the single VLM slot for 15-30 s and that lag never came back.
+    # Holding is not enough — ingest has to run FASTER than real time when nothing is
+    # asking, so a question costs a spike instead of a permanent debt. p75 of the
+    # measured distribution is 0.106 and real events score 0.1+, so this still sits
+    # below anything the demo is about.
+    motion_threshold: 0.08
     min_object_confidence: 0.40
     # DeepStream is absent and its sm_121 support unverified, so `motion` ships first:
     # ffmpeg downscales to a tiny grayscale thumbnail (C speed) and the diff is computed
@@ -334,7 +385,31 @@ vlm:
       #
       # If the gate's skip rate ever falls below ~40%, this is the first number to put
       # back: at 2.5 s a caption, real-time needs most windows to be skipped.
-      max_tokens: 320
+      #
+      # PUT BACK 2026-08-16, exactly as that line anticipated. Measured on gn100-2f74
+      # with the camera pointed at an occupied room: the gate skipped **30%** of 418
+      # judged windows, not the ~78% every budget here assumes — a room with people
+      # working in it has motion in almost every window, so the gate is behaving
+      # correctly and simply has nothing to throw away. The result was 6.6 s of work per
+      # window against a 4 s stride: 0.61x real time, ingest 35 minutes behind the
+      # camera and losing 27 s per minute of footage. It never recovers on its own.
+      #
+      # The VLM is also no longer serving captions alone: M5's stage-3 verification and
+      # the ask surface's now-automatic escalation each take the single slot for 17-30 s
+      # (see agent.search.confirm_before_widening).
+      #
+      # 160 was still not enough. Measured immediately after, on this camera's footage:
+      # the model wrote 134-141 tokens either way and a caption took 6.85 s with the GPU
+      # to itself and 14.8 s with M3/M5 running — decode floor 19.6 tok/s against the
+      # 31 tok/s DEPLOY_GN100.md measured, which is the contention, not the model.
+      # Frame sampling is NOT the problem: 376 ms in steady state (the 3.1 s the bench
+      # reports includes a one-off overlay font measurement).
+      #
+      # 96 caps decode at ~3 s at the uncontended rate, which is what a 4 s stride can
+      # actually afford once the gate stops skipping. Captions get terser; that is the
+      # trade being made, deliberately, to keep the index current with the camera. A
+      # caption that arrives 15 minutes late describes footage nobody can ask about.
+      max_tokens: 96
       temperature: 0.0
       request_timeout_seconds: 30   # expected ~2 s. Anything near this is pathological.
     deep:
@@ -399,8 +474,39 @@ index:
     path: /ranking               # NIM rerank is NOT an OpenAI-shaped route
     timeout_seconds: 30
   search:
-    ann_k: 20
+    # 60, not 20, since 2026-08-16. The recency blend below can only reorder what ANN
+    # hands it, and 20 candidates chosen by hashing-embedding similarity across a 30 min
+    # window are spread over the whole window: at ann_k=20 the top 5 for "what is
+    # happening right now" still straddled 3.5 minutes and pulled in an unrelated scene,
+    # at 60 they land inside 80 s of each other. The reranker is lexical and stdlib, so
+    # 60 short passages costs microseconds; revisit if index.rerank.backend goes to nim,
+    # where every candidate is a passage over the wire.
+    ann_k: 60
     rerank_top_n: 5
+    # Recency preference, applied AFTER the reranker scores (SPEC §3.4).
+    #
+    # The lexical reranker scores term overlap and nothing else, so within the lookback
+    # window it has no opinion about time: measured 2026-08-16, "what is happening in the
+    # room right now" ranked a caption 29 minutes old first, while captions from 5 minutes
+    # ago sat at rank 1 and below. agent.search.default_lookback_seconds was already
+    # narrowed to 30 min for this reason; it bounds the candidate set but cannot order it.
+    #
+    # `recency_weight` is the share of the final score that comes from age, on a 0..1
+    # scale after both terms are min-max normalised over the candidate set. 0 disables
+    # this entirely and restores pure rerank order.
+    #
+    # Age is measured against the NEWEST CANDIDATE, not wall clock. A question about an
+    # explicit past range would otherwise have every candidate scored as equally ancient,
+    # which is a dial that does nothing; relative recency inside the range is the useful
+    # signal in both cases.
+    # 0.6 measured, not guessed: at 0.35 the volleyball-court caption from 25 minutes ago
+    # still outranked ATM captions from 3 minutes ago on lexical overlap alone. 0.6 and
+    # 0.75 produce the identical top 5, so 0.6 is the lower edge of the plateau — far
+    # enough from the cliff to be stable, close enough that a strongly-relevant older
+    # caption can still win (one does, in the "right now" case at ann_k=20).
+    recency_weight: 0.6
+    recency_half_life_seconds: 300   # 5 min: a caption twice this old contributes a
+                                     # quarter of the recency term, not zero
   browse:
     # Listing the index in time order (the /browse page), not retrieval. Milvus has no
     # ORDER BY on `query`, so ordering means scanning the matching scalars and sorting
@@ -510,12 +616,29 @@ agent:
   prompts:
     # SPEC §4.2's gate, in words. The model is told what captions DO and DO NOT record,
     # because the whole decision turns on that distinction.
+    # SPEC §4.2's gate, in words. The model is told what captions DO and DO NOT record,
+    # because the whole decision turns on that distinction.
+    #
+    # REWRITTEN 2026-08-16, measured. The previous wording said "YES means: everything the
+    # question asks for is stated in the context", and it escalated 15 of 16 real turns —
+    # including "how many people are in the room?" against a caption reading "Two people
+    # are visible in the scene". The model read "everything ... is stated" as demanding an
+    # aggregate no per-window caption can ever contain, and refused: "they do not provide a
+    # single total count for the room across all footage". Leading with the list of what
+    # captions omit made it worse by priming the search for a reason to say NO.
+    #
+    # The gate's job is to catch questions needing detail the captions cannot hold, NOT to
+    # demand certainty. An over-strict gate is expensive in exactly the way SPEC §4.2 warns
+    # about: every question spends the single VLM slot re-watching footage, and the badge
+    # that is supposed to mean something says "not answerable" on every turn.
     groundedness: |
       You are checking whether a question can be answered from retrieved video captions ALONE.
-      The captions were written by a vision model at 1 fps from downscaled frames. They record what was present and what it was doing; they do NOT record fine visual detail — text on a sign, the state of a door, a colour read off a surface, a face, a plate.
+      The captions were written by a vision model at 1 fps from downscaled frames. Each describes one short window, so the context is a sample of moments, never a complete record of the room.
       Answer with YES or NO on the first line, then one short sentence saying why.
-      YES means: everything the question asks for is stated in the context.
-      NO means: answering would require looking at the footage again.
+      YES means: the captions support a reasonable answer, even a partial or approximate one. A count, an activity, a description or a presence stated in any caption IS an answer. Judge what the captions DO say, not what they leave out.
+      NO means: answering needs detail the captions do not record — text on a sign or screen, the state of a door, a colour read off a small surface, a face, a licence plate — or the captions simply do not mention the subject of the question at all.
+      The captions come from one fixed camera and are listed with their wall-clock times. The NEWEST caption describes the scene as it is now, so a question about the present is answered by it.
+      Do not demand a single caption that covers the whole question, do not require certainty, and do not require a simultaneous census of the scene: if a caption says how many people are visible, that answers "how many people".
       Do not answer the question itself.
     # "Two or three sentences. No preamble." was not enough. `--reasoning off` stops
     # this model emitting reasoning_content, but it is still a thinking model — so the
@@ -526,7 +649,8 @@ agent:
     answer: |
       You answer questions about recorded video using retrieved captions.
       Cite the wall-clock times of what you report, and label them UTC — the captions' timestamps are UTC.
-      State plainly when the captions do not record what was asked rather than guessing; a request_deep_analysis call is the correct response to fine visual detail.
+      The captions come from one fixed camera. The NEWEST one describes the scene as it is now, so answer a question about the present from it rather than calling it a stale snapshot.
+      State plainly when the captions do not record what was asked rather than guessing; a request_deep_analysis call is the correct response to fine visual detail — text on a sign or screen, the state of a door, a colour read off a small surface, a face, a plate — and the wrong response to a question the captions already describe.
       Answer the question in your FIRST sentence. Never restate the question, never narrate what you are about to do, and never list the captions back — the user can already see them.
       Two or three sentences. No preamble, no numbered lists.
 
@@ -551,7 +675,12 @@ agent:
     # within SPEC §5's 20-60 s realistic target. Raise `SPARK_CTX` in
     # scripts/serve_models.sh before raising this. A longer range is REFUSED with the
     # numbers in the message rather than silently truncated.
-    max_range_seconds: 25.0
+    # 25 -> 15 s. The deep path and the live captioner share ONE model (invariant 1), so
+    # every second a re-watch holds the slot is a second ingest falls behind the camera.
+    # Measured 2026-08-16: three escalations in five minutes took the lag from 49 s to
+    # 173 s. Fifteen seconds of footage at 0.4 fps is still 6 frames at native 1080p —
+    # enough to answer "what was on the whiteboard", which is what the deep path is for.
+    max_range_seconds: 15.0
     # Padding either side of the cited chunks: a 5 s window that clipped the event at
     # its boundary is precisely the case being escalated.
     range_pad_seconds: 5.0
@@ -566,6 +695,37 @@ agent:
     # here means COVERAGE, not certainty — see services/worker/analysis.py.
     hedged_confidence_factor: 0.35
     job_history: 256             # completed jobs retained for /api/chat/history replay
+
+# --------------------------------------------------------------------------------------
+# MCP actions — the outside world (SPEC §6.4)
+# --------------------------------------------------------------------------------------
+mcp:
+  # `notify_discord` posts to a Discord channel through AlertBridge, a separate service
+  # on this host that owns the webhook and its credentials. This repo holds no webhook
+  # URL, no Discord library and no token — see services/mcp/alertbridge.py.
+  #
+  # It is the only action with an effect off this box, which is exactly why it sits
+  # behind the same three brakes as every other one: a posted message cannot be
+  # un-posted, and SPEC §6.4's failure mode — thirty alerts for one event — is far worse
+  # when it has an audience.
+  discord:
+    base_url: http://100.127.233.98:8081   # Tailscale; authorized tailnet devices only
+    # The token comes from the environment, never from here and never from the repo:
+    #     export ALERTBRIDGE_SERVICE_TOKEN=...
+    # A task configured to notify Discord with no token fails LOUDLY at startup rather
+    # than silently notifying nobody — a task that looks armed and is not is the worst
+    # of both worlds.
+    username: Spark Vision              # <= 80 chars, shown as the poster in Discord
+    timeout_seconds: 5.0                # the send runs inside the action-log lock, so
+                                        # this bounds how long a slow AlertBridge can
+                                        # hold up M3 and M5. Short on purpose.
+    max_text_chars: 1900                # AlertBridge's own cap is 2000
+    # What the channel sees. Times are UTC and explicit because the reader is not on this
+    # box and has no idea what local means here.
+    text_template: |
+      🎥 **{task_id}** — {camera_id}
+      {reason}
+      Footage: {t_start} → {t_end} ({seconds}s)
 
 # --------------------------------------------------------------------------------------
 # Monitor — SPEC §6

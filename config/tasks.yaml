@@ -8,11 +8,27 @@
 #   task_id   stable slug, used as the cooldown and dedupe key
 #   describe  natural language, embedded once at registration for the stage-1 cosine
 #   window    seconds of sustained stage-2 match before promoting
-#   action    save_clip | raise_alert | file_ticket
+#   action    save_clip | raise_alert | file_ticket | notify_discord
+#
+#             notify_discord posts to a Discord channel through AlertBridge (see
+#             mcp.discord in settings.yaml). It is the only action with an effect off
+#             this box, so it needs ALERTBRIDGE_SERVICE_TOKEN in the environment of
+#             whichever process runs M5 — the agent when the monitor runs in-process,
+#             or `python3 -m services.monitor`. Without it, startup FAILS rather than
+#             quietly notifying nobody. Like raise_alert it reaches a human, so it
+#             fires UNVERIFIED and stage 3 amends or retracts the log row afterwards —
+#             the message itself cannot be un-posted, which is why the cooldown and the
+#             footage-range dedupe matter more here than anywhere else.
 #   cooldown  seconds before this task may fire again. The demo failure mode is
 #             thirty alerts for one event — see SPEC §6.4.
 #   active    LOCAL wall-clock window, may wrap midnight
 
+# NOTE 2026-08-16: the two warehouse tasks are DISABLED on this box. They describe a
+# fire door and a loading bay; the camera is pointed at a meeting room, so they could
+# never match — and a task that cannot fire is not free. Every caption pays for it twice,
+# once in the checklist appended to the prompt (prefill) and once in the verdict line the
+# model writes back (decode, out of a 96-token budget), and M5 pays a stage-2 LLM call
+# per candidate. Re-enable them when the camera looks at somewhere they can happen.
 tasks:
   - task_id: fire-door-blocked
     describe: a vehicle stopped in front of the fire door
@@ -20,7 +36,7 @@ tasks:
     action: raise_alert
     cooldown: 300
     active: "18:00-06:00"
-    enabled: true
+    enabled: false
 
   - task_id: loading-bay-activity
     describe: a person unloading boxes from a vehicle at the loading bay
@@ -28,7 +44,7 @@ tasks:
     action: save_clip
     cooldown: 120
     active: "00:00-24:00"
-    enabled: true
+    enabled: false
 
   # Registered live through the §11.3 form, then written here because a runtime
   # registration lives only in the running monitor — the agent restarted and it was gone.
@@ -42,6 +58,35 @@ tasks:
     describe: a person wearing a red wristband
     window: 5
     action: raise_alert
+    cooldown: 300
+    active: "00:00-24:00"
+    enabled: true
+
+  # Registered live through the §11.3 form, then written here for the same reason
+  # red-tag-person is: a runtime registration lives only in the running monitor.
+  #
+  # `describe` was originally worded as a human reporting the emergency — "A person fell
+  # down, feeling unconcious, heart attack, need help". Measured against the bag-of-words
+  # stage 1, that wording cannot work: scored against captions that unambiguously show a
+  # collapse it returned 0.16 / 0.10 / 0.06 / -0.04, so three of four genuine positives
+  # failed the 0.15 gate, while the best-scoring caption in the whole index was "A man
+  # sits at a table, looking to his right" at 0.21. The ranking was not weak, it was
+  # inverted — none of "heart attack", "unconcious" or "need help" ever appears in a
+  # caption, so the score was noise off "down" and "a".
+  #
+  # The wording below is what the VLM actually writes. Same four captions: 0.42 / 0.48 /
+  # 0.32, three of four now clear the gate. The cost is deliberate and worth knowing:
+  # while the camera sees a classroom, ~96% of chunks clear stage 1 (captions genuinely
+  # say "a child sitting on the floor"), so stage 2 pays an LLM confirm on nearly every
+  # one. Stage 2 rejects them correctly; this buys recall with compute, not accuracy.
+  #
+  # Still missed: a collapse captioned mid-fall ("clutches his chest and falls to the
+  # ground") scores 0.04, because it says neither "lying" nor "floor". A second task
+  # worded for that phrasing is the fix if it matters — one describe cannot cover both.
+  - task_id: sick-person-detected
+    describe: a person lying on the floor not moving
+    window: 3
+    action: notify_discord
     cooldown: 300
     active: "00:00-24:00"
     enabled: true
