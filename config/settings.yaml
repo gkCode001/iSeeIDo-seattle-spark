@@ -41,6 +41,28 @@ retention:
   # them is append-only, and they are megabytes against the archive's gigabytes.
 
 # --------------------------------------------------------------------------------------
+# Importer — recorded video as a second way in (services/importer)
+# --------------------------------------------------------------------------------------
+# The live camera is not the only source the system should accept: a demo needs footage
+# that can be CHOSEN rather than staged, and an open dataset clip has to be able to run
+# through the same gate, the same captioner and the same index as the camera does.
+#
+# An import is not a second pipeline. The file is sliced into archive segments whose
+# NAMES carry wall-clock time, which is the only thing M1..M5 use to place footage in
+# time (shared/timecode.py), so everything downstream is unchanged and the burned overlay
+# comes out right on its own.
+importer:
+  inbox: data/inbox              # drop a video here, then `python3 -m services.importer --inbox`
+  manifest: data/imports.jsonl   # what was imported, from which file, at which range
+  ffprobe_bin: ffprobe
+  # Imports get their OWN camera id — clip01, clip02 — never `camera.id`. Two sources
+  # sharing an id interleave on the timeline the moment their ranges overlap, and a
+  # stitch across the seam would splice a recording into the live camera's footage.
+  camera_id_prefix: clip
+  extensions: [mp4, mov, mkv, avi, webm, m4v]
+  poll_interval_seconds: 5.0     # --watch; a human dropping files, not a message bus
+
+# --------------------------------------------------------------------------------------
 # Recorder — SPEC §2.1
 # --------------------------------------------------------------------------------------
 recorder:

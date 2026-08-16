@@ -33,8 +33,9 @@ data/live.jpg
 # plus runtime CRUD, so it is runtime state rather than source.
 data/watchlist.json
 
-# Video a human drops on the box for the importer to pull from, and demo/source clips.
-# Input, not source — often hundreds of MB, and GitHub rejects a single file over 100 MB.
+# The importer's drop folder: video a human puts there to be pulled into the archive,
+# plus demo/source clips kept on the box. Input, not source — often hundreds of MB, and
+# GitHub rejects a single file over 100 MB.
 data/inbox/
 !data/inbox/.gitkeep
 data/testclips/
