@@ -190,7 +190,8 @@ background verification beats ingest, and ingest may be paused but never starved
 
 | Process | Port | Started by |
 |---|---|---|
-| `llama-server` (the one model) | 8000 | `make serve` |
+| Nemotron Nano 12B v2 VL | 8082 | the box: `systemctl start gn100-vlm` — never this repo |
+| Nemotron 3.5 Lightning (ask LLM) | 8000 | the box: `docker start nemoclaw-vllm` — never this repo |
 | `services/recorder` | — | `scripts/start.sh` |
 | `services/ingest --follow` | — | `scripts/start.sh` |
 | `services/agent` (API + UI) | 8080 | `scripts/start.sh` |

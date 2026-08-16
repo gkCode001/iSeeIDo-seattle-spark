@@ -1,4 +1,4 @@
-.PHONY: up down serve ingest bench lint fmt doctor
+.PHONY: up down ingest bench lint fmt doctor
 
 PY ?= python3
 
@@ -7,9 +7,6 @@ up:                ## docker compose: milvus, vllm, nim, services
 
 down:
 	docker compose down
-
-serve:             ## start the one model process (SPEC §10 D1/D3) — run this first
-	nohup ./scripts/serve_models.sh & echo "llama-server starting; log: /tmp/spark-llama-server.log"
 
 ingest:            ## run M1 against the configured source
 	$(PY) -m services.ingest

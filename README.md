@@ -81,21 +81,18 @@ NGC account, no NVIDIA container**.
 |---|---|---|
 | **Python ≥ 3.11** + PyYAML | everything | `pip3 install --user pyyaml` |
 | **ffmpeg** (with ffprobe) | recording, frame sampling, clips | `sudo apt install ffmpeg` |
-| **LM Studio** | ships the ARM64 + CUDA-13 `llama-server` this project serves its model with | [lmstudio.ai/download](https://lmstudio.ai/download) — install, open once, let it install its llama.cpp backend |
-| **A USB webcam** on `/dev/video0` | the demo source (SPEC §10 D2) | plug it in, or run with `--no-record` against existing footage |
-| ~4 GB disk for the model | `gemma-4-E2B-it` (SPEC §10 D1/D3) | **downloaded automatically on first run** |
+| **Two model servers already running** | this repo starts none — a second engine OOMs a box whose 121 GB is shared between CPU and GPU | on gn100-2f74 they are the machine's own containers: `sudo systemctl start gn100-vlm` (VLM, :8082) and `docker start nemoclaw-vllm` (ask LLM, :8000). See `DEPLOY_GN100.md` §2 |
+| **A camera** — USB on `/dev/video0`, or any RTSP URL | the demo source (SPEC §10 D2) | plug it in and set `recorder.source`, or run with `--no-record` against existing footage. |
 
-**Why LM Studio?** Only for the `llama-server` binary it bundles — a prebuilt llama.cpp
-for ARM64 + CUDA 13. Building that yourself, or getting an NGC key for the NIM
-containers, are the alternatives; this is by far the shortest path on this hardware. If
-you already have a `llama-server`, point at it instead and skip LM Studio entirely:
+**Why no model download?** Because starting one would be a bug here. The box already
+serves both models, `start.sh` checks them and stops with the fix if either is down, and
+the models are named in `config/settings.yaml` — the backends are a swap seam, so
+pointing at different servers is a config edit rather than a code change.
 
-```bash
-export SPARK_LLAMA_SERVER=/path/to/llama-server
-```
-
-The model itself comes from **HuggingFace, public, no token** — `scripts/fetch_models.sh`
-fetches it only if it is not already on disk (it checks your HF cache first).
+An earlier version of this repo downloaded a ~4 GB gemma GGUF and ran its own
+`llama-server`. That path was removed on 2026-08-16: it could only ever trigger while a
+real model server was restarting, and it would then start a third engine on a box with
+~40 GB of headroom and answer from the wrong model without saying so.
 
 ---
 
@@ -139,10 +136,9 @@ Logs land in `.run/logs/{model,recorder,ingest,agent}.log`.
 ### Running the pieces by hand
 
 ```bash
-make serve                          # 1. the one model process (must be first)
-python3 -m services.recorder        # 2. webcam -> data/archive, 60 s segments
-python3 -m services.ingest --follow # 3. gate + caption + index
-python3 -m services.agent           # 4. ask agent + UI on :8080
+python3 -m services.recorder        # 1. camera/RTSP -> data/archive, 60 s segments
+python3 -m services.ingest --follow # 2. gate + caption + index
+python3 -m services.agent           # 3. ask agent + UI on :8080
 ```
 
 ### Checks

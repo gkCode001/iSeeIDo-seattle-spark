@@ -2,12 +2,13 @@
 # Bring the whole system up on a DGX Spark, in dependency order, and wait for each piece
 # to actually answer before starting the next.
 #
-#   model server  ->  recorder  ->  ingest  ->  agent + UI
+#   model servers (checked, not started)  ->  recorder  ->  ingest  ->  agent + UI
 #
-# Anything missing that CAN be fetched safely is fetched (the ~4 GB model). Anything that
-# needs a human — a package install, a camera, LM Studio — is reported with the exact
-# command to fix it, and we stop rather than limp along in a state that looks fine and
-# is not.
+# Nothing here starts a model. The two Nemotron servers are this box's own containers
+# (DEPLOY_GN100.md §2) and a second engine OOMs the box, so a missing one is reported
+# with the command that fixes it. Same for anything else a human must resolve — a
+# package, a camera. We stop rather than limp along in a state that looks fine and is
+# not.
 #
 #   ./scripts/start.sh              # everything
 #   ./scripts/start.sh --no-record  # reuse whatever is already in data/archive
@@ -26,7 +27,8 @@ RECORD=1
 [ "${1:-}" = "--no-record" ] && RECORD=0
 
 PY="${PY:-python3}"
-VLM_PORT="$($PY -c 'from shared.config import get; print(get("vlm.endpoint").rsplit(":",1)[1].split("/")[0])' 2>/dev/null || echo 8000)"
+VLM_PORT="$($PY -c 'from shared.config import get; print(get("vlm.endpoint").rsplit(":",1)[1].split("/")[0])' 2>/dev/null || echo 8082)"
+LLM_PORT="$($PY -c 'from shared.config import get; print(get("agent.endpoint").rsplit(":",1)[1].split("/")[0])' 2>/dev/null || echo 8000)"
 UI_PORT="$($PY -c 'from shared.config import get; print(get("agent.port"))' 2>/dev/null || echo 8080)"
 
 green() { printf '\033[32m%s\033[0m\n' "$*"; }
@@ -82,24 +84,43 @@ Preflight failed. Fix the lines above and re-run. Nothing was started."
 green "  preflight ok"
 
 # --------------------------------------------------------------------------------------
-# 1. Model server — fetches the ~4 GB model on first run
+# 1. Model servers — checked, never started
 # --------------------------------------------------------------------------------------
-step "Model server (port $VLM_PORT)"
-if curl -sf -o /dev/null "http://127.0.0.1:$VLM_PORT/v1/models" 2>/dev/null; then
-    green "  already serving — reusing it"
-else
-    nohup "$HERE/serve_models.sh" >"$LOG_DIR/model.log" 2>&1 &
-    echo $! >"$RUN_DIR/model.pid"
-    printf '  loading'
-    for _ in $(seq 1 120); do
-        curl -sf -o /dev/null "http://127.0.0.1:$VLM_PORT/v1/models" 2>/dev/null && break
-        kill -0 "$(cat "$RUN_DIR/model.pid")" 2>/dev/null || { echo; tail -20 "$LOG_DIR/model.log"; die "  model server exited — see $LOG_DIR/model.log"; }
-        printf '.'; sleep 2
-    done
-    echo
-    curl -sf -o /dev/null "http://127.0.0.1:$VLM_PORT/v1/models" || die "  model server did not come up — see $LOG_DIR/model.log"
-    green "  serving"
+# This script used to fall back to downloading gemma-4-E2B-it (~4 GB) and launching its
+# own llama-server whenever the VLM port did not answer. On gn100-2f74 that fallback was
+# a trap in three ways, and it would only ever spring at the worst moment — while the
+# real model server was restarting or wedged:
+#
+#   1. It starts a SECOND model process. 121 GB is shared between CPU and GPU, the two
+#      Nemotron containers already hold ~80 GB of it, and a third engine is what OOMs
+#      the box. CLAUDE.md invariant 1 exists because of exactly this.
+#   2. It serves the WRONG MODEL. Every measurement in DEPLOY_GN100.md is Nemotron; a
+#      demo silently answering from gemma would look like it worked.
+#   3. It downloads 4 GB, on a box whose demo is rehearsed with the network off.
+#
+# So: report and stop. Both servers belong to this machine's own provisioning and are
+# started by systemd and docker, never by us.
+step "Model servers (VLM :$VLM_PORT, ask LLM :$LLM_PORT)"
+MODELS_DOWN=0
+curl -sf -o /dev/null "http://127.0.0.1:$VLM_PORT/v1/models" 2>/dev/null \
+    || { red "  VLM not answering on :$VLM_PORT      fix: sudo systemctl start gn100-vlm"; MODELS_DOWN=1; }
+curl -sf -o /dev/null "http://127.0.0.1:$LLM_PORT/v1/models" 2>/dev/null \
+    || { red "  ask LLM not answering on :$LLM_PORT   fix: docker start nemoclaw-vllm"; MODELS_DOWN=1; }
+if [ "$MODELS_DOWN" = 1 ]; then
+    die "
+The model servers are this box's own containers; this script does not start them and
+must not start one of its own. Bring the missing one up, WARM IT (the VL's first request
+after a restart takes ~26 s), then re-run.
+
+Order matters: the VL container joins nemoclaw-vllm's network namespace, so touching
+nemoclaw-vllm kills the VL's networking. Always:
+
+    sudo systemctl stop gn100-vlm  ->  fix nemoclaw-vllm  ->  wait for :$LLM_PORT
+                                   ->  sudo systemctl start gn100-vlm
+
+Nothing was started."
 fi
+green "  both serving — this script starts no model process (invariant 1)"
 
 # --------------------------------------------------------------------------------------
 # 2. Recorder — writes data/archive continuously, independent of any AI (SPEC §2.1)

@@ -32,3 +32,9 @@ data/live.jpg
 # captioner needs the task list across a process boundary). Derived from config/tasks.yaml
 # plus runtime CRUD, so it is runtime state rather than source.
 data/watchlist.json
+
+# Video a human drops on the box for the importer to pull from, and demo/source clips.
+# Input, not source — often hundreds of MB, and GitHub rejects a single file over 100 MB.
+data/inbox/
+!data/inbox/.gitkeep
+data/testclips/

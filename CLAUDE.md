@@ -142,34 +142,46 @@ build has `cuda` hwaccel (verified initialising on this box), `h264_cuvid`/`av1_
 NVDEC decoders, `h264_nvenc` (verified encoding on GB10), and v4l2 capture. No CUDA
 rebuild is needed for §2.4.
 
-### Models — D1 and D3, resolved 2026-08-15
+### Models — D1 and D3, re-resolved on gn100-2f74
 
-**One model, one process, no NGC, no docker.** `gemma-4-E2B-it` (Q4_K_XL + mmproj-F16,
-~4 GB) serves the live captioner, the deep worker AND the ask LLM. It was already in the
-HuggingFace cache. Start it with `make serve` (`scripts/serve_models.sh`).
+**Two servers, neither of them ours, and this repo starts no model process.**
+`DEPLOY_GN100.md` §2 is ground truth; the short version:
 
-Served by the **CUDA-13 ARM64 `llama-server` bundled inside LM Studio**
-(`~/.lmstudio/extensions/backends/llama.cpp-linux-arm64-nvidia-cuda13-*/`). That prebuilt
-sm_121 binary is why none of the NGC/docker path is needed.
+| Slot | Model | Endpoint | Owned by |
+|---|---|---|---|
+| VLM — live captions + deep worker | `nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-NVFP4-QAD` | `:8082` | systemd `gn100-vlm.service` |
+| Ask LLM — M3 + M5 stage 2 | `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4` | `:8000` | container `nemoclaw-vllm` |
 
-Measured on this box, real 1080p webcam footage:
+`scripts/start.sh` **checks** both and refuses to run if either is down, naming the fix.
+It used to fall back to downloading `gemma-4-E2B-it` (~4 GB) and launching its own
+llama-server; that fallback is deleted, along with `serve_models.sh` and
+`fetch_models.sh`. It could only ever fire while a real server was restarting, and it
+would then start a third engine on a box with ~40 GB of headroom, serve the wrong model,
+and do it silently. If you need the old single-model path, it is in git history before
+2026-08-16.
+
+Measured on this box, live 1080p footage (`DEPLOY_GN100.md` §4):
 
 | | |
 |---|---|
-| Caption, 5 frames | **2.55 s cold, 1.17 s warm** (budget 4 s, SPEC target ~2 s) |
-| Decode floor | ~31 tok/s |
-| Gate skip rate | **78%** of judged windows |
-| Deep analysis | **8.6 s** end to end (target 20–60 s) |
-| Reads the burned clock? | **Yes** — captions cite `2026-08-15 09:21:13 UTC` unprompted |
+| Caption, 5 frames @512px, warm | **3.0–3.1 s** (budget 4 s) |
+| Deep, 14 native 1080p frames (~32k prompt tokens) | **30 s** (budget 20–60 s) |
+| Cold start after a model-server restart | **~26 s** for the first request — warm it before believing any number |
+| Gate skip rate | **78–91%** of judged windows |
+| Reads the burned clock? | **Yes** — captions cite the overlay unprompted |
 
-**`--reasoning off` is load-bearing, not a preference.** This is a thinking model: left
-on, it spends the entire 80-token live budget inside `reasoning_content` and returns an
-**empty caption** with `finish_reason=length`. That is invariant 6 as a server flag —
-`enable_reasoning: false` in settings.yaml is NIM/Cosmos vocabulary that llama-server does
-not speak, so the switch must be made at launch. `scripts/serve_models.sh` sets it.
+**Reasoning-off is load-bearing on both models, and it is a different switch on each.**
+On the VL it is `enable_reasoning: false` in the profile. On Lightning it is
+`agent.extra_body.chat_template_kwargs.enable_thinking: false` — the only thing that
+works; `/no_think` and "detailed thinking off" system prompts were tested and do
+nothing. Without it Lightning writes its reasoning into `content` and the groundedness
+gate's first-line YES/NO parse breaks.
 
-Bigger local vision models (Qwen3.8-27B, Ornith-35B, Muse-Glimmer-30B, 15–30 GB) are
-4–8× slower per token and cannot hold a 4 s stride. Keep them as deep-path fallbacks.
+A third vision model, `nvidia/Cosmos-Reason2-2B`, is served on `:8083` by the
+`cosmos-reason2` container. Nothing in this repo points at it. It is a candidate for the
+deep path — the deck leads with Cosmos — but its 16k context cannot hold the deep
+profile's ~32k-token request, so it would need fewer or downscaled frames. Benchmark
+before switching (SPEC §10 D1's rule: the number decides, not taste).
 
 **Camera: a USB webcam is the demo source (D2 resolved).** Attached and verified
 end-to-end 2026-08-15. `/dev/video0` is the capture node (`/dev/video1` exposes no
@@ -209,9 +221,10 @@ clips and the deep worker's seek both. Measured here: an 8.3 s GOP served 8.07 s
 `recorder.device.keyframe_interval_seconds: 1.0` and `-g` on the capture path. Raising it
 silently degrades `pts_offset` precision, which is invariant 2's whole point.
 
-Beware local model runners: LM Studio and `unsloth studio` (port 8888) load models into
-the same unified memory and will silently eat the budget in §7.1. Shut them down before
-ingest — see invariant 1.
+Beware anything else that loads weights: LM Studio, `unsloth studio` (port 8888), a
+stray vLLM container. They take from the same unified pool the two Nemotron servers
+already hold ~80 GB of. `make doctor` warns about them; shut them down before ingest —
+see invariant 1.
 
 ---
 
@@ -263,8 +276,7 @@ index browser at /browse.html. Logs in `.run/logs/{model,recorder,ingest,agent}.
 By hand / individual pieces:
 
 ```bash
-make serve                          # the one model process — must be running first
-python3 -m services.recorder        # webcam → data/archive
+python3 -m services.recorder        # camera/RTSP → data/archive
 python3 -m services.ingest --follow # M1 (or: make ingest, one-shot)
 python3 -m services.agent           # M3 + UI on :8080
 make bench                          # time a single caption — the number that governs everything
