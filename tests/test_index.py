@@ -691,6 +691,40 @@ class TestPersistence(unittest.TestCase):
                 self.assertEqual(top.record.segment, SEGMENT)
                 self.assertEqual(top.record.pts_offset, EVENT_PTS)
 
+    def test_a_reader_sees_captions_written_after_it_opened(self) -> None:
+        """M1 writes while M3 is already up; M3 must answer from the live corpus.
+
+        The regression this pins: the reader loaded the JSONL once and latched, so an
+        agent started before ingest answered every question from a frozen corpus —
+        real hits, well-formed, and about the wrong footage.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "index.jsonl"
+
+            with make_store(path=path) as writer, make_store(path=path) as reader:
+                # The reader is open and has already served a query against an empty file.
+                self.assertEqual(reader.stats().captioned, 0)
+                self.assertEqual(reader.search("white van reversing"), [])
+
+                writer.insert(corpus())
+
+                self.assertEqual(reader.stats().captioned, len(corpus()))
+                top = reader.search("white van reversing at the loading door")[0]
+                self.assertEqual(top.time_range, (EVENT_START, EVENT_END))
+
+    def test_a_writer_records_its_own_write_so_it_never_re_reads_it(self) -> None:
+        """The re-read is for *external* change. M1 re-reading its own corpus on every
+        insert would turn each caption into a full-file parse."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "index.jsonl"
+            dims = IndexSettings.from_config().embed_dims
+
+            backend = InMemoryBackend(dims, path)
+            backend.upsert(corpus())
+
+            self.assertIsNotNone(backend._file_stamp)
+            self.assertEqual(backend._file_stamp, backend._stamp())
+
 
 class TestBrowse(unittest.TestCase):
     """Listing the index — what the /api/index browser pages through.

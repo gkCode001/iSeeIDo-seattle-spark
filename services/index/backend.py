@@ -242,6 +242,18 @@ class InMemoryBackend:
     fixture corpus once and keep querying it across restarts. The file is rewritten
     whole and swapped atomically — at SPEC §3.2's volumes it is megabytes, and a
     half-written index that survives a crash is worse than one that does not.
+
+    **The file is re-read whenever it changes, not once at startup.** M1, M3 and M5 are
+    separate processes and only M1 writes; a load-once latch meant M3 answered from the
+    corpus as it stood the moment M3 booted and never saw another caption. That failure
+    is invisible from inside a turn — retrieval returns real, well-formed, stale hits —
+    so it reads as "the agent is wrong about what just happened" rather than as a bug.
+    Measured on gn100-2f74 (2026-08-16): with a live camera, every question about the
+    last ten minutes was answered from footage recorded before the agent started.
+
+    Detection is (size, mtime_ns) on the path, and ``_persist`` records its own write so
+    a writer never re-reads what it just emitted. Records merge by ``chunk_id``, so a
+    reload cannot drop rows this process holds but the file has not seen yet.
     """
 
     def __init__(self, dims: int, path: Path | None = None) -> None:
@@ -251,20 +263,33 @@ class InMemoryBackend:
         self._gated: dict[str, ChunkRecord] = {}
         self._norms: dict[str, float] = {}
         self._loaded = False
+        self._file_stamp: tuple[int, int] | None = None
 
     # -- lifecycle ---------------------------------------------------------------
 
+    def _stamp(self) -> tuple[int, int] | None:
+        """``(size, mtime_ns)`` of the persisted corpus, or None if there is no file."""
+        if not self._path:
+            return None
+        try:
+            st = self._path.stat()
+        except FileNotFoundError:
+            return None
+        return (st.st_size, st.st_mtime_ns)
+
     def ensure_ready(self) -> None:
-        if self._loaded:
+        stamp = self._stamp()
+        if self._loaded and stamp == self._file_stamp:
             return
         self._loaded = True
-        if self._path and self._path.is_file():
-            with self._path.open("r", encoding="utf-8") as fh:
-                records = [ChunkRecord.from_dict(json.loads(line)) for line in fh if line.strip()]
-            self._absorb(records)
-            log_event(
-                "index.memory.loaded", path=str(self._path), records=len(records)
-            )
+        self._file_stamp = stamp
+        if stamp is None or not self._path:
+            return
+        assert self._path is not None
+        with self._path.open("r", encoding="utf-8") as fh:
+            records = [ChunkRecord.from_dict(json.loads(line)) for line in fh if line.strip()]
+        self._absorb(records)
+        log_event("index.memory.loaded", path=str(self._path), records=len(records))
 
     def close(self) -> None:
         self._persist()
@@ -300,6 +325,9 @@ class InMemoryBackend:
                 for record in self._all():
                     fh.write(json.dumps(record.to_dict()) + "\n")
             os.replace(tmp_name, self._path)
+            # Our own write is not an external change: stamping it here stops the writer
+            # from re-reading the file it just produced on its very next read.
+            self._file_stamp = self._stamp()
         except BaseException:
             Path(tmp_name).unlink(missing_ok=True)
             raise

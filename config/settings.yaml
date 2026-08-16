@@ -26,12 +26,30 @@ recorder:
   # The archive is what the deep worker re-reads. Never downscale it, never re-encode
   # it to save disk. CLAUDE.md invariant 7.
   copy_codec: true
-  # SPEC §10 D2 — RESOLVED: a USB webcam is the primary source. Live, no network, and an
-  # event can be staged in front of it on cue. /dev/video* selects the device path;
-  # rtsp:// and a file path both still work unchanged.
-  source: /dev/video0
+  # SPEC §10 D2 — RESOLVED on gn100-2f74: an iPhone running IP Camera Lite, pulled over
+  # RTSP. This box has no /dev/video* at all (verified 2026-08-16: no USB video device on
+  # any bus), and an iPhone cannot be a USB webcam on Linux.
+  #
+  # The address is the phone's PERSONAL HOTSPOT over the USB cable, not its WiFi address.
+  # That was a deliberate choice and it is the better one: the link is point-to-point, so
+  # it cannot be broken by WiFi client isolation or by the phone's DHCP lease moving, and
+  # the same cable keeps the phone charged — which is what actually keeps an iOS camera
+  # app alive for a 30-hour run. 172.20.10.1 is iOS's fixed hotspot gateway address.
+  #
+  # Measured from this stream 2026-08-16: h264 1440x1080@30, keyframes every 1.0 s (the
+  # app already does what `device.keyframe_interval_seconds` would have asked for), AAC
+  # audio alongside, ~6.3 Mbps. Stream-copied, so invariant 7 holds trivially.
+  #
+  # Credentials are IP Camera Lite's defaults on a private USB link; `redact_source`
+  # keeps them out of the logs.
+  source: rtsp://admin:admin@172.20.10.1:8554/live
   device:
-    # Capture MODE, not a downscale. Verified against the attached camera 2026-08-15:
+    # UNUSED while `source` is an rtsp:// URL — every key below applies only to the
+    # SourceKind.DEVICE path (see services/recorder/command.py). Kept intact so a USB
+    # camera can be dropped back in by changing `source` alone.
+    #
+    # Capture MODE, not a downscale. Verified against a USB camera on the ORIGINAL dev
+    # box 2026-08-15 (that camera is not attached to gn100-2f74):
     #   ffmpeg -f v4l2 -list_formats all -i /dev/video0
     #   mjpeg: 1920x1080, 1080x1920, 3840x2160, 1728x3072   (no raw formats at all)
     # 1080p matches SPEC §2.1's archive budget. 3840x2160 is offered and would give the
