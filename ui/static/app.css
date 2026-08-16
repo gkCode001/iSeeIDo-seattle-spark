@@ -1675,3 +1675,60 @@ a.pill:hover {
   font-size: 11.5px;
   padding: 4px 9px;
 }
+
+/* ── deep-job state ──────────────────────────────────────────────────────────────
+   A running job and a finished one used to render identically: same muted meta row,
+   same "⏱ Ns / 90s timeout". The only moment the line read as meaningful was the moment
+   it stopped being true, which is backwards — the wait is the thing worth showing, since
+   SPEC §4.3's whole point is that the turn did not block on it.
+
+   The pulse is CSS-only and respects prefers-reduced-motion. No spinner glyph cycling in
+   JS: the elapsed counter is already the honest progress signal, driven off the job's
+   absolute requested_at rather than a frame counter, so a busy tab cannot make the wait
+   look shorter than it was. */
+.job-state {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.job-state--run {
+  color: var(--info);
+  border-color: rgba(106, 168, 224, 0.45);
+  background: rgba(106, 168, 224, 0.12);
+  animation: job-pulse 1.4s ease-in-out infinite;
+}
+.job-state--done {
+  color: var(--ok);
+  border-color: rgba(88, 209, 160, 0.45);
+  background: rgba(88, 209, 160, 0.1);
+}
+.job-state--timeout {
+  color: var(--bad);
+  border-color: rgba(224, 112, 106, 0.5);
+  background: rgba(224, 112, 106, 0.12);
+  font-weight: 700;
+}
+
+/* The whole line lifts while live, so it is findable in a long transcript without
+   reading it. */
+.jobline--run {
+  border-left: 2px solid rgba(106, 168, 224, 0.55);
+  padding-left: 8px;
+}
+
+.timer--pending {
+  font-variant-numeric: tabular-nums;
+  color: var(--info);
+}
+
+@keyframes job-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .job-state--run { animation: none; }
+}
