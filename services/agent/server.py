@@ -49,13 +49,14 @@ from services.index import IndexStore, build_index
 from services.ingest.watchlist import write_watchlist
 from services.mcp import ActionServer, ClipCutter, NullClipCutter, build_clip_plan, clip_path_for
 from services.retention import RetentionSettings, apply_retention, plan_retention
-from shared import config, timecode
+from shared import config, lmstudio, timecode
+from shared.lmstudio import LMStudioError
 from shared.schema import DeepJob, JobState, Tier, from_iso, to_iso, utcnow
 
 from .agent import AskAgent
 from .deep import JobRegistry, JobUpdate, UnavailableAnalyzer, WorkerAnalyzer
 from .history import ChatLog
-from .llm import build_backend
+from .llm import DEFAULT_SOURCE, build_backend, build_source_backend, describe_sources
 from .settings import AgentSettings
 from .tasks import DuplicateTaskError, SeedTaskRegistry, TaskRegistry, task_from_payload
 from .telemetry import log_event
@@ -95,6 +96,11 @@ class AgentApp:
     #: task registered through this server would never reach it. Sharing the registry is
     #: what makes "create a task, then have it fire" true.
     monitor: Any | None = None
+    #: Which model source the topbar selector is on. Mutable, unlike everything above it:
+    #: this is the one dependency the page is allowed to rebind at runtime. Held here and
+    #: not read back off the backend because ``default`` and ``lmstudio`` can resolve to
+    #: the same model id — the id does not say which endpoint served it.
+    model_source: str = DEFAULT_SOURCE
 
     # -- lifecycle --------------------------------------------------------------------
 
@@ -161,6 +167,71 @@ class AgentApp:
     def get_config(self) -> tuple[int, dict[str, Any]]:
         """``config/settings.yaml`` as JSON. Read, never written — it is owned elsewhere."""
         return HTTPStatus.OK, dict(config.load())
+
+    def get_model(self) -> tuple[int, dict[str, Any]]:
+        """Which model is answering, and what else this box could answer with.
+
+        Probes both sources on every call rather than caching: LM Studio's model is
+        loaded and unloaded from a GUI this process cannot see, so a cached "available"
+        is a promise we have no way to keep.
+        """
+        sources = describe_sources(self.settings)
+        active = self.model_source
+        payload: dict[str, Any] = {
+            "active": active,
+            "model": self.agent.backend.model,
+            "backend": self.agent.backend.name,
+            "sources": [source.to_dict() for source in sources],
+            # The selector rebinds THIS surface. Ingest is another process holding
+            # another client, and saying so on the page is cheaper than someone
+            # discovering it from a caption that did not change.
+            "scope": "ask surface only — M1's captioner keeps using vlm.endpoint",
+        }
+        both_up = active == DEFAULT_SOURCE and any(
+            s.id == lmstudio.BACKEND and s.available for s in sources
+        )
+        if both_up:
+            payload["warning"] = (
+                "LM Studio is also serving a model. Two model processes share one 128 GB "
+                "pool — quit one before the demo (CLAUDE.md invariant 1)."
+            )
+        return HTTPStatus.OK, payload
+
+    def post_model(self, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        """Switch the ask surface onto another model source.
+
+        Builds first and rebinds only on success, so a failed switch leaves the surface
+        answering with the model it already had rather than with nothing.
+        """
+        source = str(body.get("source") or "").strip()
+        if not source:
+            return HTTPStatus.BAD_REQUEST, {"detail": "body needs a `source`"}
+        if source == self.model_source:
+            return self.get_model()
+        try:
+            backend = build_source_backend(source, self.settings)
+        except ValueError as exc:
+            return HTTPStatus.BAD_REQUEST, {"detail": str(exc)}
+        except LMStudioError as exc:
+            # The expected failure: nothing loaded, too small a context, nothing
+            # listening. It is the user's to fix in the GUI, so hand back the sentence.
+            return HTTPStatus.CONFLICT, {"detail": str(exc)}
+        except Exception as exc:  # noqa: BLE001 - one bad switch, not one dead server
+            return HTTPStatus.BAD_GATEWAY, {"detail": f"{type(exc).__name__}: {exc}"}
+
+        previous = self.agent.backend.model
+        self.agent.use_backend(backend)
+        self.model_source = source
+        log_event(
+            "agent.model.switched",
+            source=source,
+            model=backend.model,
+            backend=backend.name,
+            previous=previous,
+        )
+        status, payload = self.get_model()
+        payload["switched_from"] = previous
+        return status, payload
 
     def get_chunks(
         self, t_from: datetime | None, t_to: datetime | None
@@ -691,6 +762,8 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             if route == "/api/config":
                 self._send_json(*self.app.get_config())
+            elif route == "/api/model":
+                self._send_json(*self.app.get_model())
             elif route == "/api/chunks":
                 self._send_json(*self.app.get_chunks(self._param("t_from"), self._param("t_to")))
             elif route == "/api/index":
@@ -742,6 +815,8 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             if route == "/api/ask":
                 self._send_json(*self.app.post_ask(body))
+            elif route == "/api/model":
+                self._send_json(*self.app.post_model(body))
             elif route == "/api/register_task":
                 self._send_json(*self.app.post_register_task(body))
             elif route == "/api/retention":
@@ -1060,7 +1135,8 @@ def build_app(
     registry = JobRegistry(deep, resolved)
     chat_log = ChatLog(resolved.chat_log)
     toolbox = Toolbox(store, action_server, registry, resolved)
-    agent = AskAgent(build_backend(resolved), toolbox, chat_log, resolved)
+    source, backend = _startup_source(resolved)
+    agent = AskAgent(backend, toolbox, chat_log, resolved)
 
     task_registry = tasks
     monitor_runner = None
@@ -1080,6 +1156,7 @@ def build_app(
         settings=resolved,
         clip_cutter=clip_cutter if clip_cutter is not None else _default_cutter(),
         monitor=monitor_runner,
+        model_source=source,
     )
     if monitor_runner is not None:
         # Push funnel state and each new action to the panes as they happen, over the
@@ -1087,6 +1164,30 @@ def build_app(
         monitor_runner._on_state = app.publish_monitor_state  # noqa: SLF001 - same module
         monitor_runner._on_action = app.publish_action  # noqa: SLF001
     return app
+
+
+def _startup_source(settings: AgentSettings) -> tuple[str, Any]:
+    """Resolve ``agent.model_source`` into a backend, falling back to the default.
+
+    A console that will not start because LM Studio happens to be closed is worse than
+    one that starts on the configured model and offers the switch in the topbar — which
+    is where the choice belongs anyway. The fallback is logged, never silent.
+    """
+    source = str(config.get("agent.model_source", DEFAULT_SOURCE) or DEFAULT_SOURCE)
+    if source == DEFAULT_SOURCE:
+        return DEFAULT_SOURCE, build_backend(settings)
+    try:
+        backend = build_source_backend(source, settings)
+    except Exception as exc:  # noqa: BLE001 - any failure means "start on the default"
+        log_event(
+            "agent.model.fallback",
+            requested=source,
+            error=f"{type(exc).__name__}: {exc}",
+            using=DEFAULT_SOURCE,
+        )
+        return DEFAULT_SOURCE, build_backend(settings)
+    log_event("agent.model.selected", source=source, model=backend.model)
+    return source, backend
 
 
 def _build_monitor(actions: ActionServer) -> tuple[TaskRegistry | None, Any | None]:

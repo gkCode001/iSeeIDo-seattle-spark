@@ -48,6 +48,8 @@ SPARK.data = (function () {
     actions: "/api/actions", //                   GET  ?t_from&t_to -> {entries: [ActionLogEntry]}
     retention: "/api/retention", //               GET  -> the plan; POST {confirm} -> deletes it
     video: "/api/video", //                       GET  ?t_from&t_to -> stitched stream (NEVER ?file=)
+    model: "/api/model", //                       GET  -> {active, model, sources: [ModelSource]}
+    //                                                 POST {source} -> the same, switched
   };
 
   var MOCK_BASE = "mock/";
@@ -133,6 +135,35 @@ SPARK.data = (function () {
     var body = { confirm: true };
     if (olderThanSeconds) body.older_than_seconds = olderThanSeconds;
     return postJSON(ENDPOINTS.retention, body);
+  }
+
+  // ---------------------------------------------------------------------------------
+  // Model source — which model answers, chosen from the topbar.
+  //
+  // Mock mode reports the two options and refuses the switch. The fixtures answer from
+  // a scripted script, not a model, so "now using LM Studio" would be a claim about
+  // something this page is not doing.
+  // ---------------------------------------------------------------------------------
+  function loadModel() {
+    if (isMock()) {
+      return Promise.resolve({
+        active: "default",
+        model: "mock fixtures",
+        backend: "mock",
+        sources: [
+          { id: "default", label: "gemma-4-E2B-it", model: "fixtures", available: true, detail: "mock", note: "" },
+          { id: "lmstudio", label: "LM Studio", model: "—", available: false, detail: "live mode only", note: "" },
+        ],
+      });
+    }
+    return getJSON(ENDPOINTS.model);
+  }
+
+  function selectModel(source) {
+    if (isMock()) {
+      return Promise.reject(new Error("switching models needs live M3; this page is on fixtures"));
+    }
+    return postJSON(ENDPOINTS.model, { source: source });
   }
 
   function postJSON(url, body) {
@@ -584,6 +615,8 @@ SPARK.data = (function () {
     patchTask: patchTask,
     retentionPlan: retentionPlan,
     applyRetention: applyRetention,
+    loadModel: loadModel,
+    selectModel: selectModel,
     syntheticMonitorRow: syntheticMonitorRow,
     ask: ask,
     demoQuestions: demoQuestions,

@@ -432,6 +432,63 @@ class TestRetentionControl(unittest.TestCase):
         self.assertIn("retention.max_age_seconds", self.js)
 
 
+class TestModelSelector(unittest.TestCase):
+    """The topbar control that chooses which model answers on the Ask surface.
+
+    Structural, like the two classes above. What is pinned here is the shape that keeps
+    the control honest: it names the model rather than the vendor, it says why a source
+    it cannot reach is unreachable, and it does not claim to have switched anything in
+    mock mode — where nothing is answering but a script.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.html = (UI_DIR / "index.html").read_text(encoding="utf-8")
+        cls.js = (UI_DIR / "static" / "model.js").read_text(encoding="utf-8")
+        cls.data = (UI_DIR / "static" / "data.js").read_text(encoding="utf-8")
+        cls.app = (UI_DIR / "static" / "app.js").read_text(encoding="utf-8")
+
+    def test_the_control_is_wired_and_shipped(self) -> None:
+        self.assertIn("data-model-button", self.html)
+        self.assertIn("data-model-list", self.html)
+        self.assertIn('src="static/model.js"', self.html)
+        self.assertIn("SPARK.model.init()", self.app)
+
+    def test_both_sources_come_from_the_server_not_the_page(self) -> None:
+        """The page must not hard-code "gemma-4-E2B-it" or LM Studio's port: which models
+        exist is settings.yaml's business, and which one is LOADED is LM Studio's."""
+        self.assertNotIn("1234", self.js)
+        self.assertNotIn("gemma", self.js.lower())
+        self.assertIn("state.sources", self.js)
+
+    def test_the_pill_names_the_model(self) -> None:
+        """"LM Studio" alone does not say what answered — and comparing two models on one
+        question is the entire reason this control exists."""
+        self.assertIn("state.model", self.js)
+        self.assertIn("model-row-id", self.js)
+
+    def test_an_unreachable_source_shows_why(self) -> None:
+        self.assertIn("source.available", self.js)
+        self.assertIn("model-row-why", self.js)
+        self.assertIn("source.detail", self.js)
+
+    def test_availability_is_re_probed_on_open(self) -> None:
+        """LM Studio is loaded and unloaded from a GUI this page cannot see, so anything
+        read at page load is already stale by the time it is offered."""
+        opener = self.js[self.js.index("function open()") :][:400]
+        self.assertIn("refresh()", opener)
+
+    def test_mock_mode_cannot_claim_to_switch_a_model(self) -> None:
+        select = self.data[self.data.index("function selectModel") :][:400]
+        self.assertIn("isMock()", select)
+        self.assertIn("reject", select)
+
+    def test_the_scope_of_the_switch_is_rendered(self) -> None:
+        """It rebinds M3 only. The captioner is another process and does not move."""
+        self.assertIn("data-model-scope", self.html)
+        self.assertIn("state.scope", self.js)
+
+
 class TestIndexNavLink(unittest.TestCase):
     """The console links to the index browser, and must not navigate away to get there.
 
@@ -505,3 +562,46 @@ class TestModeDetection(unittest.TestCase):
         true timezone and thresholds."""
         self.assertIn("getJSON(ENDPOINTS.config)", self.loader)
         self.assertIn("config.json", self.loader)
+
+
+class TestHiddenAttributeActuallyHides(unittest.TestCase):
+    """The `hidden` attribute must beat every component's own `display`.
+
+    Browsers implement `hidden` as `[hidden] { display: none }` in the UA stylesheet,
+    which any class selector out-specifies. So a component that declares `display: flex`
+    silently ignores every `el.hidden = true` in the JS — attribute set, element still on
+    screen, no error anywhere.
+
+    This regressed three times before the global rule existed: the player's canvas/video
+    pair sat as a dead black rectangle, `.live-offline` covered a working camera, and
+    `.purge` — the confirm strip for the one control that destroys footage — was displayed
+    permanently, so the console always looked mid-delete.
+    """
+
+    def _css(self) -> str:
+        return (UI_DIR / "static" / "app.css").read_text(encoding="utf-8")
+
+    def test_the_global_rule_exists_and_is_important(self) -> None:
+        css = re.sub(r"/\*.*?\*/", "", self._css(), flags=re.S)
+        match = re.search(r"\[hidden\]\s*\{([^}]*)\}", css)
+        self.assertIsNotNone(match, "app.css has no global [hidden] rule")
+        body = match.group(1)
+        self.assertIn("display", body)
+        self.assertIn("none", body)
+        self.assertIn(
+            "!important",
+            body,
+            "without !important the rule loses to any class that sets display, which is "
+            "the whole failure this rule exists to prevent",
+        )
+
+    def test_every_element_marked_hidden_is_covered(self) -> None:
+        """Each `hidden` in the markup is a promise the stylesheet has to keep."""
+        css = re.sub(r"/\*.*?\*/", "", self._css(), flags=re.S)
+        self.assertRegex(css, r"\[hidden\]\s*\{[^}]*display\s*:\s*none\s*!important")
+        for page in ("index.html", "browse.html"):
+            html = (UI_DIR / page).read_text(encoding="utf-8")
+            if re.search(r"<[^>]*\shidden(\s|>|/)", html):
+                break
+        else:
+            self.fail("no element uses the hidden attribute; this suite is testing nothing")

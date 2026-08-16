@@ -391,6 +391,15 @@ agent:
   backend: nim                   # stub | nim (OpenAI-compatible; llama-server speaks it)
   endpoint: http://localhost:8000/v1   # same llama-server as the VLM — one process
   max_tokens: 512
+  # Which of the two model sources the console's topbar selector starts on:
+  #   default  -> agent.backend/endpoint/model above, i.e. `make serve`'s llama-server
+  #   lmstudio -> whatever model LM Studio currently has loaded (see the block at the
+  #               bottom of this file)
+  # The selector rebinds the ASK surface only. M1's captioner runs in the ingest process
+  # and keeps talking to vlm.endpoint whatever this says — a web page cannot reach into
+  # another process, and pretending otherwise would put the two surfaces on different
+  # models without saying so.
+  model_source: default          # default | lmstudio
   host: 0.0.0.0
   port: 8080
   groundedness_gate: true        # SPEC §4.2 — retrieval distance is NOT confidence
@@ -425,7 +434,23 @@ agent:
   actions:
     lookback_seconds: 86400
   history:
-    max_turns: 200
+    max_turns: 200               # how many turns GET /api/chat/history replays to the page
+
+    # How many PRIOR turns the model sees. Without this every turn is independent, and a
+    # follow-up — "what were they wearing?" after "is anyone at the door?" — has no idea
+    # who "they" is: it re-retrieves from scratch against a pronoun and answers whatever
+    # the ANN happens to return.
+    #
+    # Small on purpose. Prior turns are prefill on EVERY call, and there are two calls a
+    # turn (gate + answer). 3 turns of question plus a clipped answer is roughly 400-600
+    # tokens; going to 10 would cost more prefill than the 5 retrieved captions do.
+    # 0 disables it and restores the old stateless behaviour.
+    context_turns: 3
+
+    # Prior answers are clipped to this before going in. An answer can be 512 tokens and
+    # the useful part for resolving a reference is the first sentence or two — carrying
+    # all of it crowds out the captions, which are the actual evidence.
+    context_answer_chars: 400
   ws:
     ping_interval_seconds: 25.0  # a silent WebSocket dies to an idle proxy; this keeps
                                  # the refinement channel open across a 90 s deep job
@@ -548,6 +573,47 @@ ui:
   poll_interval_ms: 1000
   # SPEC §11.1 / CLAUDE.md invariant 10 — the demo runs with the network off.
   vendored_assets_only: true
+
+# --------------------------------------------------------------------------------------
+# LM Studio — the OTHER model source the console's topbar selector can switch M3 onto.
+# --------------------------------------------------------------------------------------
+# `make serve` starts our own llama-server on 8000 using the CUDA-13 ARM64 binary that
+# LM Studio ships. This block is for the opposite arrangement: LM Studio is already
+# running with a model loaded, and we borrow it. That is the cheap way to A/B a candidate
+# model — load it in the GUI, pick "LM Studio" in the topbar, ask the same question twice
+# — with no second copy in our model dir.
+#
+# It does NOT relax invariant 1. Selecting LM Studio changes which endpoint M3 talks to;
+# it cannot stop the server `make serve` started. If both are up, both are resident and
+# both are eating the 128 GB budget — /api/model reports that and the topbar says so.
+lmstudio:
+  endpoint: http://localhost:1234/v1    # LM Studio's default local-server port
+
+  # null = use whatever model is loaded, which is the point of this option: no filename
+  # to keep in sync with the GUI. Pin an id here to require a specific one.
+  model: null
+
+  # The ask surface is text-only, so a text model is fine here. Set true if you ever
+  # point the CAPTIONER at LM Studio — without a vision projector it fails on frame one.
+  require_vision: false
+
+  # A 1080p frame costs ~261 prompt tokens, so the deep path's 25 s at 4 fps is ~26k.
+  # LM Studio loads whatever its GUI slider says; below this a deep request returns
+  # HTTP 400, which reaches the UI as a job that never completes (see agent.deep).
+  min_context_tokens: 32768
+
+  resolve_timeout_seconds: 5            # one GET against localhost; the UI waits on it
+
+  # `--reasoning off --reasoning-budget 0` is a LAUNCH flag, and we are not the launcher.
+  # gemma-4 is a thinking model: left on it spends the whole budget inside
+  # reasoning_content and returns an EMPTY answer with finish_reason=length. These fields
+  # are merged into every request body to make the same switch per-request. Which spelling
+  # a given llama.cpp/LM Studio build honours is a build detail, so send both and keep
+  # them here rather than in code — an unknown field is ignored, a missing one is not.
+  reasoning_off_payload:
+    reasoning_format: none
+    chat_template_kwargs:
+      enable_thinking: false
 
 # --------------------------------------------------------------------------------------
 # Doctor — `make doctor` checks this box against the CLAUDE.md machine-state table.

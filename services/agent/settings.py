@@ -92,6 +92,10 @@ class AgentSettings:
     browse_caption_preview_chars: int
     actions_lookback_seconds: float
     history_max_turns: int
+    #: Prior turns folded into both prompts so a follow-up can resolve its pronouns.
+    #: 0 restores the stateless behaviour. See ``agent.history.context_turns``.
+    history_context_turns: int
+    history_context_answer_chars: int
     ws_ping_interval_seconds: float
 
     # --- prompts ------------------------------------------------------------------
@@ -153,6 +157,10 @@ class AgentSettings:
             ),
             actions_lookback_seconds=float(_pending("agent.actions.lookback_seconds")),  # type: ignore[arg-type]
             history_max_turns=int(_pending("agent.history.max_turns")),  # type: ignore[arg-type]
+            history_context_turns=int(_pending("agent.history.context_turns")),  # type: ignore[arg-type]
+            history_context_answer_chars=int(
+                _pending("agent.history.context_answer_chars")  # type: ignore[arg-type]
+            ),
             ws_ping_interval_seconds=float(_pending("agent.ws.ping_interval_seconds")),  # type: ignore[arg-type]
             groundedness_prompt=str(_pending("agent.prompts.groundedness")),
             answer_prompt=str(_pending("agent.prompts.answer")),

@@ -55,6 +55,25 @@
         >
           delete old footage
         </button>
+        <!-- Which model answers on the Ask surface. Two sources, both already running
+             somewhere: the llama-server `make serve` started, and whatever LM Studio
+             has loaded. The control switches between them; it starts and stops
+             nothing, which is why both being up is a warning and not a mode. -->
+        <div class="model" data-model>
+          <button
+            type="button"
+            class="pill pill--model"
+            data-model-button
+            title="which model is answering"
+          >
+            model…
+          </button>
+          <div class="model-panel" data-model-panel hidden>
+            <div class="model-list" data-model-list></div>
+            <p class="model-note" data-model-note hidden></p>
+            <p class="model-scope muted" data-model-scope></p>
+          </div>
+        </div>
         <span class="pill" data-mode-pill>…</span>
         <span class="pill pill--quiet" data-tz-pill>…</span>
         <span class="pill pill--quiet" data-clock-pill>--:--:--</span>
@@ -258,6 +277,7 @@
     <script src="static/watch.js" defer></script>
     <script src="static/timeline.js" defer></script>
     <script src="static/retention.js" defer></script>
+    <script src="static/model.js" defer></script>
     <script src="static/app.js" defer></script>
   </body>
 </html>
