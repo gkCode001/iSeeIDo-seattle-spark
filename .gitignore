@@ -32,3 +32,12 @@ data/live.jpg
 # captioner needs the task list across a process boundary). Derived from config/tasks.yaml
 # plus runtime CRUD, so it is runtime state rather than source.
 data/watchlist.json
+
+# The importer's drop folder: videos a human puts there to be pulled into the archive.
+# Input, not source — some of it will be gigabytes of open dataset.
+data/inbox/
+!data/inbox/.gitkeep
+
+# Demo/source clips kept on the box for the importer to pull from. Video, often
+# hundreds of MB — GitHub rejects a single file over 100 MB and this is not source.
+data/testclips/

@@ -17,6 +17,7 @@ import json
 import logging
 import sys
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import datetime
 
 from shared import config
@@ -47,6 +48,12 @@ def build_parser() -> argparse.ArgumentParser:
         "survivors, write chunk records (SPEC §2).",
     )
     parser.add_argument("--archive", help="override paths.archive for this run")
+    parser.add_argument(
+        "--camera-id",
+        help="which camera's segments to walk (default: camera.id). An imported "
+        "recording has its own id — `clip01` — so this is how it gets re-captioned "
+        "after a prompt change without touching the live camera's chunks.",
+    )
     parser.add_argument(
         "--from",
         dest="t_from",
@@ -95,6 +102,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
 
     settings = IngestSettings.from_config(args.archive)
+    if args.camera_id:
+        settings = replace(settings, camera_id=args.camera_id)
     t_from = _parse_instant(args.t_from)
     t_to = _parse_instant(args.t_to)
 

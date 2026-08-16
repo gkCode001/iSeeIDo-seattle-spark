@@ -16,6 +16,7 @@ The SPEC's M-numbers are used everywhere (commits, tests, this file). They map t
 | | Module | Role |
 |---|---|---|
 | — | `services/recorder/` | ffmpeg segmenter: webcam → `data/archive/`, 60 s segments (§2.1) |
+| — | `services/importer/` | recorded video → archive segments on a real timeline, then M1. The second way footage gets in |
 | M1 | `services/ingest/` | motion gate + live captioner + telemetry (§2) |
 | M2 | `services/index/` | chunk index; **in-process library, no `__main__`** (§3) |
 | M3 | `services/agent/` | ask agent + stdlib `http.server` / hand-rolled RFC 6455 WebSocket server + UI on :8080 (§4) |
@@ -256,6 +257,18 @@ Everything runs on the host. The docker path (`make up`, `docker-compose.yml`,
 ./scripts/start.sh --no-record   # skip the camera, use existing data/archive
 ./scripts/stop.sh                # SIGTERM shutdown (never kill -9 — corrupts the open segment)
 ```
+
+Recorded video is the second way in — drop a file in `data/inbox/` and:
+
+```bash
+python3 -m services.importer --inbox     # slice it onto the timeline, then caption it
+python3 -m services.importer --watch     # keep importing whatever lands in the folder
+```
+
+An import gets **its own camera id** (`clip01`), lands **ending now** so it falls inside
+the ask surface's 30-minute window, and is then walked by the same M1 — same gate, same
+prompt, same index. It is not a second pipeline: wall-clock lives in the segment
+filename, so naming the slices correctly is the whole trick.
 
 UI at http://127.0.0.1:8080/ (`?mode=mock` rehearses against `ui/mock/` fixtures);
 index browser at /browse.html. Logs in `.run/logs/{model,recorder,ingest,agent}.log`.
