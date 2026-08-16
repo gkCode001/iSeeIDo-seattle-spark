@@ -6,7 +6,8 @@ that re-watches the footage) and a **watch** monitor (standing tasks → MCP act
 
 Full design in `SPEC.md`. Read §2–§3 before touching ingest or the schema, and §11
 before touching the UI. `ARCHITECTURE.md` is the plain-language walkthrough with
-diagrams; `README.md` has current build status and per-module test counts.
+diagrams; `README.md` has current build status. `DEPLOY_GN100.md` is ground truth for
+this box: the two model servers it talks to, the measured budgets, and the runbook.
 
 ## Module map
 
@@ -219,12 +220,13 @@ ingest — see invariant 1.
 
 ## Testing
 
-- `shared/timecode.py` needs real tests: boundary-spanning ranges, segment gaps,
-  clock drift, DST-adjacent local conversions. This module is load-bearing.
-- Mock the VLM in unit tests. Never call the real endpoint from `pytest` — it
-  contends with ingest.
-- Keep a 2-minute fixture clip in `tests/fixtures/` with a known event at a known
-  timestamp, and assert retrieval returns the right range.
+**Do not write unit tests.** There is no test suite in this repo — `tests/` was deleted
+deliberately, not lost. Do not add one back, do not add a test alongside a fix, and do
+not add a `make test` target.
+
+Verify changes by running the thing instead: `./scripts/start.sh`, then the logs in
+`.run/logs/` and a real `POST /api/ask`. On a live box with a camera attached that is
+both faster and stronger evidence than a mock.
 
 ---
 
@@ -252,16 +254,8 @@ python3 -m services.ingest --follow # M1 (or: make ingest, one-shot)
 python3 -m services.agent           # M3 + UI on :8080
 make bench                          # time a single caption — the number that governs everything
 make doctor                         # check this box against the machine-state table below
-make test                           # full suite
 make lint                           # ruff check
 make fmt                            # ruff format
-```
-
-Tests are stdlib `unittest` — no pytest, no third-party packages. One file / one test:
-
-```bash
-python3 -m unittest tests.test_timecode -v
-python3 -m unittest tests.test_timecode.TestClass.test_name
 ```
 
 ---

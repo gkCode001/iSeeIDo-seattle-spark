@@ -19,19 +19,19 @@ Full design in [`SPEC.md`](SPEC.md). Working rules and hard invariants in
 
 ## Where this actually is
 
-**523 tests pass.** `python3 -m unittest discover -s tests -t .`, stdlib only.
+**The whole chain runs on this box, on live camera footage.** There is no test suite: `tests/` was removed deliberately (see CLAUDE.md). Changes are verified by running the stack and reading `.run/logs/`.
 
 | Module | State |
 |---|---|
-| `shared/` — schema, timecode, VLM client, priority queue | **Built and tested.** 121 tests. `timecode.py` is load-bearing and covers boundary-spanning ranges, segment gaps, drift and DST. |
-| `services/recorder/` — the ffmpeg segmenter (SPEC §2.1) | **Built and tested.** 55 tests. Verified end-to-end against the real USB webcam on 2026-08-15. |
-| `services/index/` — M2, the index (SPEC §3) | **Built and tested.** 48 tests. Runs today on the `memory` + `hashing` + `lexical` backends, i.e. with no Milvus and no NGC key. |
-| `services/mcp/` — the action server and the three brakes (SPEC §6.4) | **Built and tested.** 44 tests. |
-| `ui/` — the single page, three panes (SPEC §11) | **Built and tested.** 22 tests. Renders from fixtures in `ui/mock/`; assets vendored, no CDN. |
-| `services/ingest/` — M1, gate + captioning (SPEC §2) | **Built and tested.** 79 tests. Motion gate needs no new dependency: ffmpeg emits 32x32 grayscale thumbnails and the diff is pure Python. Measured **78% skip rate** on real webcam footage (SPEC targets ≥80%). |
-| `services/worker/` — M4, the deep worker (SPEC §5) | **Built and tested.** 46 tests. Cuts real evidence clips across segment boundaries. Confidence is a documented *coverage* heuristic, not certainty. |
-| `services/agent/` — M3, the ask agent + server (SPEC §4) | **Built and tested.** 76 tests. stdlib `http.server` + a hand-rolled RFC 6455 WebSocket, because fastapi is not installed and was not approved. |
-| `services/monitor/` — M5, the standing-task funnel (SPEC §6) | **Built and tested.** 30 tests, including the headline one: 180 overlapping chunks across 12 minutes of one event fire **exactly one** action. |
+| `shared/` — schema, timecode, VLM client, priority queue | **Built.** `timecode.py` is load-bearing: boundary-spanning ranges, segment gaps, drift, DST. |
+| `services/recorder/` — the ffmpeg segmenter (SPEC §2.1) | **Built.** Verified end-to-end against a USB webcam (2026-08-15) and an iPhone over RTSP (2026-08-16). |
+| `services/index/` — M2, the index (SPEC §3) | **Built.** Runs today on the `memory` + `hashing` + `lexical` backends, i.e. with no Milvus and no NGC key. |
+| `services/mcp/` — the action server and the three brakes (SPEC §6.4) | **Built.** |
+| `ui/` — the single page, three panes (SPEC §11) | **Built.** Renders from fixtures in `ui/mock/`; assets vendored, no CDN. |
+| `services/ingest/` — M1, gate + captioning (SPEC §2) | **Built.** Motion gate needs no new dependency: ffmpeg emits 32x32 grayscale thumbnails and the diff is pure Python. Measured **78% skip rate** on real webcam footage (SPEC targets ≥80%). |
+| `services/worker/` — M4, the deep worker (SPEC §5) | **Built.** Cuts real evidence clips across segment boundaries. Confidence is a documented *coverage* heuristic, not certainty. |
+| `services/agent/` — M3, the ask agent + server (SPEC §4) | **Built.** stdlib `http.server` + a hand-rolled RFC 6455 WebSocket, because fastapi is not installed and was not approved. |
+| `services/monitor/` — M5, the standing-task funnel (SPEC §6) | **Built.** The brakes are the point: 180 overlapping chunks across 12 minutes of one event fire **exactly one** action. |
 | `docker-compose.yml`, `deploy/` | **Written, never run.** See "The deployment layer has never executed" below. |
 
 **The full chain runs on real models, on real footage.** camera → recorder → M1 → M2 →
@@ -149,7 +149,6 @@ python3 -m services.agent           # 4. ask agent + UI on :8080
 
 ```bash
 make doctor    # this box vs CLAUDE.md's machine-state table
-make test      # 523 tests, stdlib unittest, no third-party packages
 make bench     # SPEC §9 block 0 — time a single caption
 make lint      # ruff
 ```
@@ -348,7 +347,6 @@ services/                recorder, ingest (M1), index (M2), agent (M3), worker (
 ui/                      console (index.html: three panes + players) and the index
                          browser (browse.html). Vendored assets, no CDN.
 scripts/doctor.py        `make doctor`
-tests/                   290 stdlib unittest tests
 docker-compose.yml       the container topology — never run, see above
 deploy/                  Dockerfile.app, .env.example
 data/                    archive/, clips/, actions.jsonl, chats.jsonl — bind-mounted, never committed

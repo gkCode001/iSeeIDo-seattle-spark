@@ -1,4 +1,4 @@
-.PHONY: up down serve ingest bench test lint fmt doctor
+.PHONY: up down serve ingest bench lint fmt doctor
 
 PY ?= python3
 
@@ -16,9 +16,6 @@ ingest:            ## run M1 against the configured source
 
 bench:             ## time a single caption — the number that governs everything (SPEC §9 block 0)
 	$(PY) -m services.ingest.bench
-
-test:              ## stdlib unittest — no third-party packages required
-	$(PY) -m unittest discover -s tests -t . -v
 
 lint:
 	ruff check .

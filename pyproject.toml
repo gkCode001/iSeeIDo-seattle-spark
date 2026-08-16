@@ -19,11 +19,10 @@ dependencies = [
 # Pending approval — needed before the corresponding module can run.
 serve = ["fastapi", "uvicorn[standard]", "websockets"]   # M3 + UI (SPEC §4.3, §11.1)
 index = ["pymilvus", "numpy"]                            # M2 (SPEC §3.2)
-dev = ["pytest", "ruff"]
+dev = ["ruff"]
 
-# Tests are written as stdlib `unittest` so they run with no third-party packages:
-#   python3 -m unittest discover -s tests -v
-# pytest is a convenience, never a requirement.
+# There is no test suite: `tests/` was removed deliberately. Changes are verified by
+# running the stack against the live camera and model servers — see CLAUDE.md.
 
 [tool.ruff]
 line-length = 100
