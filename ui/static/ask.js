@@ -196,7 +196,15 @@ SPARK.ask = (function () {
     if (on) {
       if (existing) return;
       var p = div("pending");
-      p.textContent = "⌕ searching index …";
+      p.appendChild(document.createTextNode("⌕ searching index … "));
+      // The ask POST does not return until the provisional is ready — measured at 10.7 s
+      // on this box. Without an elapsed here the first third of an escalation is a
+      // motionless line, which reads as a hung page rather than as work in progress.
+      var pt = document.createElement("span");
+      pt.className = "timer timer--pending";
+      pt.dataset.startedAt = String(Date.now());
+      pt.textContent = "0s";
+      p.appendChild(pt);
       node.appendChild(p);
     } else if (existing) {
       existing.remove();
@@ -325,9 +333,24 @@ SPARK.ask = (function () {
     return wrap;
   }
 
+  /** The state chip. Without it a running job and a finished one render identically —
+   *  same muted row, same "⏱ Ns / 90s timeout" — so the only moment the line reads as
+   *  meaningful is the moment it STOPS being true. freezeTimers() flips it to DONE and
+   *  the timeout path flips it to TIMED OUT. */
+  function jobState(jobId) {
+    var chip = document.createElement("span");
+    chip.className = "job-state job-state--run";
+    chip.dataset.jobId = jobId;
+    chip.textContent = "⟳ RUNNING";
+    return chip;
+  }
+
   function jobLine(job) {
-    var wrap = div("jobline");
+    var wrap = div("jobline jobline--run");
+    wrap.dataset.jobId = job.job_id;
     var l1 = div("jobline-row");
+    l1.appendChild(jobState(job.job_id));
+    l1.appendChild(document.createTextNode(" "));
     l1.appendChild(strong("job " + job.job_id));
     l1.appendChild(document.createTextNode(" · re-watching "));
     l1.appendChild(citeChip(job.t_start, job.t_end, "deep range"));
@@ -352,8 +375,11 @@ SPARK.ask = (function () {
   /** SPEC §11.2: "already running — job 7f3a". A silent no-op reads as a bug in
    *  rehearsal, and §4.3 requires the second identical range not be queued twice. */
   function dedupeNotice(jobId, turn) {
-    var wrap = div("jobline jobline--dedupe");
+    var wrap = div("jobline jobline--dedupe jobline--run");
+    wrap.dataset.jobId = jobId;
     var l1 = div("jobline-row");
+    l1.appendChild(jobState(jobId));
+    l1.appendChild(document.createTextNode(" "));
     l1.appendChild(strong("⧉ already running — job " + jobId));
     wrap.appendChild(l1);
     var l2 = div("jobline-row jobline-row--meta");
@@ -397,6 +423,15 @@ SPARK.ask = (function () {
 
   function tickTimers() {
     var now = Date.now();
+
+    // Pending timers are keyed off their own start stamp rather than a job, because they
+    // exist for the window BEFORE a job id is known — the blocking ask POST.
+    document.querySelectorAll(".timer--pending").forEach(function (el) {
+      var started = Number(el.dataset.startedAt);
+      if (!started) return;
+      el.textContent = Math.floor((now - started) / 1000) + "s";
+    });
+
     Object.keys(jobs).forEach(function (jobId) {
       var rec = jobs[jobId];
       if (rec.done) return;
@@ -410,6 +445,7 @@ SPARK.ask = (function () {
       });
       if (timedOut && !rec.timedOut) {
         rec.timedOut = true;
+        setJobState(jobId, "timeout");
         rec.turnIds.forEach(function (tid) {
           var node = turnNode(tid);
           if (!node || node.querySelector(".answer--timeout")) return;
@@ -520,6 +556,23 @@ SPARK.ask = (function () {
     assertProvisionalIntact(node, prov);
   }
 
+  /** One place that owns the chip's three states, so a new call site cannot invent a
+   *  fourth wording for "this job is over". */
+  function setJobState(jobId, state) {
+    var text = { done: "✓ DONE", timeout: "✗ TIMED OUT", run: "⟳ RUNNING" }[state] || state;
+    document.querySelectorAll('.job-state[data-job-id="' + cssEscape(jobId) + '"]').forEach(
+      function (el) {
+        el.className = "job-state job-state--" + state;
+        el.textContent = text;
+      }
+    );
+    document.querySelectorAll('.jobline[data-job-id="' + cssEscape(jobId) + '"]').forEach(
+      function (el) {
+        el.classList.toggle("jobline--run", state === "run");
+      }
+    );
+  }
+
   function freezeTimers(job) {
     var elapsed =
       job.completed_at && job.requested_at
@@ -530,6 +583,7 @@ SPARK.ask = (function () {
       el.classList.remove("timer--warn", "timer--timeout");
       el.textContent = elapsed === null ? "done" : elapsed.toFixed(1) + "s";
     });
+    setJobState(job.job_id, "done");
   }
 
   /** Guard rail, not decoration. If a future change ever rewrites the provisional in
